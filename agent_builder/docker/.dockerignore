@@ -1,0 +1,43 @@
+# Ignore common development files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore logs
+*.log
+logs/
+
+# Ignore temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore documentation
+*.md
+docs/
+
+# Only include what we need for the agent
+!requirements.txt
+!base_agent.py
+!Dockerfile.agent
