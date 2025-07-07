@@ -1,0 +1,215 @@
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+
+from base_agent import SandboxAgent
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+
+class {{ agent_name | class_name }}Agent(SandboxAgent):
+    """{{ template_info.description }}"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "{{ agent_name }}"
+        self.version = "1.0.0"
+        self.capabilities = {{ template_info.capabilities }}
+        self.gmail_service: Optional[object] = None
+        self.last_check_time: Optional[datetime] = None
+        self.running: bool = True
+        
+        # Configuration
+        self.check_interval = {{ check_interval | default(300) }}  # seconds
+        self.email_filter = "{{ email_filter }}"
+        self.sender_filter = {% if sender_filter %}"{{ sender_filter }}"{% else %}None{% endif %}
+        self.subject_filter = {% if subject_filter %}"{{ subject_filter }}"{% else %}None{% endif %}
+        self.alert_webhook = {% if alert_webhook %}"{{ alert_webhook }}"{% else %}None{% endif %}
+
+    async def initialize(self) -> None:
+        """Initialize Gmail service connection."""
+        try:
+            # Load credentials from secrets
+            secrets = self.get_secrets()
+            gmail_creds = secrets.get('gmail_credentials')
+            
+            if not gmail_creds:
+                raise ValueError("Gmail credentials not found in secrets")
+            
+            # Parse credentials JSON
+            import json
+            creds_data = json.loads(gmail_creds)
+            
+            credentials = Credentials.from_authorized_user_info(
+                creds_data,
+                scopes=["https://www.googleapis.com/auth/gmail.readonly"]
+            )
+            
+            self.gmail_service = build("gmail", "v1", credentials=credentials)
+            self.last_check_time = datetime.utcnow() - timedelta(minutes=5)
+            
+            logger.info("Gmail service initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Gmail service: {str(e)}")
+            raise
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(3)
+    )
+    async def check_emails(self) -> List[Dict]:
+        """Check for new emails matching the filter."""
+        try:
+            # Build query
+            query_parts = []
+            
+            # Time filter
+            if self.last_check_time:
+                after_timestamp = int(self.last_check_time.timestamp())
+                query_parts.append(f"after:{after_timestamp}")
+            
+            # Email filter
+            if self.email_filter:
+                query_parts.append(self.email_filter)
+            
+            # Sender filter
+            if self.sender_filter:
+                query_parts.append(f"from:{self.sender_filter}")
+            
+            # Subject filter
+            if self.subject_filter:
+                query_parts.append(f"subject:{self.subject_filter}")
+            
+            query = " ".join(query_parts)
+            logger.debug(f"Gmail query: {query}")
+            
+            # Search emails
+            results = self.gmail_service.users().messages().list(
+                userId="me",
+                q=query
+            ).execute()
+
+            messages = []
+            if "messages" in results:
+                for message in results["messages"]:
+                    msg_detail = self.gmail_service.users().messages().get(
+                        userId="me",
+                        id=message["id"]
+                    ).execute()
+                    messages.append(msg_detail)
+
+            logger.info(f"Found {len(messages)} new emails")
+            return messages
+            
+        except HttpError as e:
+            logger.error(f"HTTP error occurred while checking emails: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error checking emails: {str(e)}")
+            raise
+
+    async def process_messages(self, messages: List[Dict]) -> None:
+        """Process found messages and send alerts."""
+        try:
+            for message in messages:
+                headers = {h["name"]: h["value"] for h in message["payload"]["headers"]}
+                subject = headers.get("Subject", "")
+                sender = headers.get("From", "")
+                date = headers.get("Date", "")
+                
+                # Extract message snippet
+                snippet = message.get("snippet", "")
+                
+                alert_data = {
+                    "subject": subject,
+                    "sender": sender,
+                    "date": date,
+                    "snippet": snippet,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message_id": message["id"],
+                    "labels": message.get("labelIds", [])
+                }
+                
+                await self.send_alert(alert_data)
+                logger.info(f"Processed email: {subject} from {sender}")
+                
+        except Exception as e:
+            logger.error(f"Error processing messages: {str(e)}")
+            raise
+
+    async def send_alert(self, email_data: Dict[str, Any]) -> None:
+        """Send alert about new email."""
+        try:
+            if self.alert_webhook:
+                # Send webhook notification
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    webhook_payload = {
+                        "type": "email_received",
+                        "data": email_data,
+                        "agent": self.name,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    
+                    async with session.post(
+                        self.alert_webhook,
+                        json=webhook_payload,
+                        timeout=10
+                    ) as response:
+                        if response.status == 200:
+                            logger.info("Alert sent via webhook")
+                        else:
+                            logger.warning(f"Webhook returned status {response.status}")
+            else:
+                # Log alert (fallback)
+                logger.info(f"ALERT: New email from {email_data['sender']}: {email_data['subject']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send alert: {str(e)}")
+
+    async def execute(self) -> Any:
+        """Main execution loop - monitor emails continuously."""
+        logger.info("Starting email monitoring loop")
+        
+        while self.running:
+            try:
+                # Check for new emails
+                messages = await self.check_emails()
+                
+                if messages:
+                    await self.process_messages(messages)
+                
+                # Update last check time
+                self.last_check_time = datetime.utcnow()
+                
+                logger.debug("Completed email check cycle")
+                
+                # Wait for next check
+                await asyncio.sleep(self.check_interval)
+                
+            except Exception as e:
+                logger.error(f"Error in monitoring loop: {str(e)}")
+                # Brief pause before retry on error
+                await asyncio.sleep(30)
+        
+        return {
+            "status": "monitoring_stopped",
+            "last_check": self.last_check_time.isoformat() if self.last_check_time else None
+        }
+
+    async def cleanup(self) -> None:
+        """Cleanup resources."""
+        try:
+            self.running = False
+            if self.gmail_service:
+                self.gmail_service.close()
+            logger.info("Gmail monitor cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            raise

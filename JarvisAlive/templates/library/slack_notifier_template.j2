@@ -1,0 +1,299 @@
+import asyncio
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+import json
+
+from base_agent import SandboxAgent
+from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.errors import SlackApiError
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+
+class {{ agent_name | class_name }}Agent(SandboxAgent):
+    """{{ template_info.description }}"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "{{ agent_name }}"
+        self.version = "1.0.0"
+        self.capabilities = {{ template_info.capabilities }}
+        self.slack_client: Optional[AsyncWebClient] = None
+        self.running: bool = True
+        
+        # Configuration
+        self.channel = "{{ channel }}"
+        self.username = {% if username %}"{{ username }}"{% else %}"{{ agent_name }}"{% endif %}
+        self.icon_emoji = {% if icon_emoji %}"{{ icon_emoji }}"{% else %}None{% endif %}
+        self.webhook_url = {% if webhook_url %}"{{ webhook_url }}"{% else %}None{% endif %}
+
+    async def initialize(self) -> None:
+        """Initialize Slack client."""
+        try:
+            # Load Slack token from secrets
+            secrets = self.get_secrets()
+            slack_token = secrets.get('slack_token') or "{{ slack_token }}"
+            
+            if not slack_token:
+                raise ValueError("Slack token not found in secrets or configuration")
+            
+            self.slack_client = AsyncWebClient(token=slack_token)
+            
+            # Test connection
+            await self.test_connection()
+            
+            logger.info("Slack client initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Slack client: {str(e)}")
+            raise
+
+    async def test_connection(self) -> None:
+        """Test Slack API connection."""
+        try:
+            response = await self.slack_client.auth_test()
+            if response["ok"]:
+                logger.info(f"Connected to Slack as {response['user']}")
+            else:
+                raise Exception(f"Slack auth test failed: {response}")
+                
+        except SlackApiError as e:
+            logger.error(f"Slack API error: {e.response['error']}")
+            raise
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=8),
+        stop=stop_after_attempt(3)
+    )
+    async def send_message(
+        self,
+        text: str,
+        channel: Optional[str] = None,
+        attachments: Optional[List[Dict]] = None,
+        blocks: Optional[List[Dict]] = None,
+        thread_ts: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send a message to Slack.
+        
+        Args:
+            text: Message text
+            channel: Channel to send to (defaults to configured channel)
+            attachments: Message attachments
+            blocks: Block kit blocks
+            thread_ts: Thread timestamp for replies
+            
+        Returns:
+            Slack API response
+        """
+        try:
+            target_channel = channel or self.channel
+            
+            message_kwargs = {
+                "channel": target_channel,
+                "text": text,
+                "username": self.username
+            }
+            
+            if self.icon_emoji:
+                message_kwargs["icon_emoji"] = self.icon_emoji
+            
+            if attachments:
+                message_kwargs["attachments"] = attachments
+            
+            if blocks:
+                message_kwargs["blocks"] = blocks
+                
+            if thread_ts:
+                message_kwargs["thread_ts"] = thread_ts
+            
+            response = await self.slack_client.chat_postMessage(**message_kwargs)
+            
+            if response["ok"]:
+                logger.info(f"Message sent to {target_channel}")
+                return response
+            else:
+                raise Exception(f"Failed to send message: {response}")
+                
+        except SlackApiError as e:
+            logger.error(f"Slack API error sending message: {e.response['error']}")
+            raise
+        except Exception as e:
+            logger.error(f"Error sending message: {str(e)}")
+            raise
+
+    async def send_rich_message(
+        self,
+        title: str,
+        message: str,
+        color: str = "good",
+        fields: Optional[List[Dict[str, str]]] = None,
+        channel: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Send a rich message with attachments."""
+        attachment = {
+            "color": color,
+            "title": title,
+            "text": message,
+            "timestamp": int(datetime.utcnow().timestamp())
+        }
+        
+        if fields:
+            attachment["fields"] = fields
+        
+        return await self.send_message(
+            text=title,
+            channel=channel,
+            attachments=[attachment]
+        )
+
+    async def send_alert(
+        self,
+        alert_type: str,
+        message: str,
+        severity: str = "info",
+        additional_data: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Send an alert message with proper formatting."""
+        try:
+            # Color based on severity
+            color_map = {
+                "critical": "danger",
+                "error": "danger", 
+                "warning": "warning",
+                "info": "good",
+                "success": "good"
+            }
+            color = color_map.get(severity.lower(), "good")
+            
+            # Build fields
+            fields = [
+                {"title": "Type", "value": alert_type, "short": True},
+                {"title": "Severity", "value": severity.upper(), "short": True},
+                {"title": "Time", "value": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), "short": True},
+                {"title": "Agent", "value": self.name, "short": True}
+            ]
+            
+            if additional_data:
+                for key, value in additional_data.items():
+                    if len(fields) < 8:  # Limit fields
+                        fields.append({
+                            "title": key.replace("_", " ").title(),
+                            "value": str(value)[:100],  # Truncate long values
+                            "short": True
+                        })
+            
+            await self.send_rich_message(
+                title=f"🚨 {alert_type.title()} Alert",
+                message=message,
+                color=color,
+                fields=fields
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to send alert: {str(e)}")
+
+    async def send_webhook_message(self, payload: Dict[str, Any]) -> None:
+        """Send message via webhook (fallback method)."""
+        if not self.webhook_url:
+            logger.warning("No webhook URL configured")
+            return
+            
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.webhook_url,
+                    json=payload,
+                    timeout=10
+                ) as response:
+                    if response.status == 200:
+                        logger.info("Message sent via webhook")
+                    else:
+                        logger.warning(f"Webhook returned status {response.status}")
+                        
+        except Exception as e:
+            logger.error(f"Webhook sending failed: {str(e)}")
+
+    async def monitor_channel(self, channel: str, keywords: List[str]) -> None:
+        """Monitor a channel for specific keywords (example usage)."""
+        try:
+            # This is a basic example - in practice you'd use RTM or Events API
+            logger.info(f"Monitoring {channel} for keywords: {keywords}")
+            
+            # Get recent messages (last hour)
+            now = datetime.utcnow()
+            oldest = int((now.timestamp() - 3600))  # 1 hour ago
+            
+            response = await self.slack_client.conversations_history(
+                channel=channel,
+                oldest=str(oldest)
+            )
+            
+            if response["ok"]:
+                messages = response["messages"]
+                for message in messages:
+                    text = message.get("text", "").lower()
+                    for keyword in keywords:
+                        if keyword.lower() in text:
+                            await self.send_alert(
+                                alert_type="keyword_detected",
+                                message=f"Found keyword '{keyword}' in {channel}",
+                                additional_data={
+                                    "channel": channel,
+                                    "keyword": keyword,
+                                    "message_text": text[:200],
+                                    "user": message.get("user", "unknown")
+                                }
+                            )
+                            
+        except Exception as e:
+            logger.error(f"Error monitoring channel: {str(e)}")
+
+    async def execute(self) -> Any:
+        """Main execution - send a test message or wait for events."""
+        logger.info("Slack notifier ready")
+        
+        # Send initialization message
+        await self.send_message(
+            text=f"🤖 {self.name} is now online and ready to send notifications!"
+        )
+        
+        # Example: Send a status update every hour
+        while self.running:
+            try:
+                await asyncio.sleep(3600)  # Wait 1 hour
+                
+                if self.running:
+                    await self.send_message(
+                        text=f"💚 {self.name} status: Active and monitoring"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Error in main loop: {str(e)}")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+        
+        return {
+            "status": "notifier_stopped",
+            "channel": self.channel
+        }
+
+    async def cleanup(self) -> None:
+        """Cleanup resources."""
+        try:
+            self.running = False
+            
+            # Send goodbye message
+            if self.slack_client:
+                await self.send_message(
+                    text=f"👋 {self.name} is shutting down"
+                )
+                await self.slack_client.close()
+                
+            logger.info("Slack notifier cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            raise

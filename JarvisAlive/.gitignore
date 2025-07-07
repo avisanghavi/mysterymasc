@@ -1,0 +1,185 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.cover
+*.log
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+.pdm.toml
+.pdm-python
+.pdm-build/
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+package-lock.json
+yarn.lock
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+*.pid
+
+# Redis
+dump.rdb
+*.rdb
+redis.log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Environment and Config
+.env
+.env.*
+!.env.example
+config.json
+config.yaml
+secrets.json
+secrets.yaml
+*.key
+*.pem
+
+# Logs and Databases
+*.log
+logs/
+*.sqlite
+*.db
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.orig
+
+# Agent-specific (HeyJarvis)
+agents/**/sandbox/
+agents/**/logs/
+agents/**/cache/
+sandbox_*
+test_agent_*
+debug_agent_*
+
+# Generated files
+generated_agents/
+agent_outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.tox/
+.coverage
+htmlcov/
+test-results/
+junit.xml
+coverage.xml
+*.cover
+
+# Documentation
+docs/_build/
+site/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Backup files
+*.backup
+*.bk
+*~
+
+# Security - Never commit these
+*.key
+*.crt
+*.pem
+.secrets/
+credentials/
+auth/
+
+# Local development
+local_settings.py
+.local/ 
+.env

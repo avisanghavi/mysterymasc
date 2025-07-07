@@ -1,0 +1,450 @@
+import asyncio
+import logging
+import os
+import json
+import csv
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union, Callable
+import hashlib
+import mimetypes
+
+from base_agent import SandboxAgent
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+
+class {{ agent_name | class_name }}Agent(SandboxAgent):
+    """{{ template_info.description }}"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "{{ agent_name }}"
+        self.version = "1.0.0"
+        self.capabilities = {{ template_info.capabilities }}
+        self.running: bool = True
+        self.processed_files: List[Dict[str, Any]] = []
+        
+        # Configuration
+        self.input_path = Path("{{ input_path }}")
+        self.operation = "{{ operation }}"
+        self.output_path = {% if output_path %}Path("{{ output_path }}"){% else %}None{% endif %}
+        self.file_pattern = {% if file_pattern %}"{{ file_pattern }}"{% else %}"*"{% endif %}
+        self.transformation_rules = {% if transformation_rules %}{{ transformation_rules | tojson }}{% else %}{}{% endif %}
+
+    async def initialize(self) -> None:
+        """Initialize file processor and validate paths."""
+        try:
+            # Validate input path
+            if not self.input_path.exists():
+                raise FileNotFoundError(f"Input path does not exist: {self.input_path}")
+            
+            # Create output directory if specified
+            if self.output_path:
+                self.output_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Output directory: {self.output_path}")
+            
+            # Validate operation
+            valid_operations = [
+                'copy', 'move', 'compress', 'extract', 'convert', 
+                'analyze', 'cleanup', 'backup', 'transform', 'monitor'
+            ]
+            if self.operation not in valid_operations:
+                raise ValueError(f"Invalid operation '{self.operation}'. Valid: {valid_operations}")
+            
+            logger.info(f"File processor initialized - Operation: {self.operation}")
+            logger.info(f"Input path: {self.input_path}")
+            logger.info(f"File pattern: {self.file_pattern}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize file processor: {str(e)}")
+            raise
+
+    def get_file_info(self, file_path: Path) -> Dict[str, Any]:
+        """Get comprehensive file information."""
+        try:
+            stat = file_path.stat()
+            mime_type, _ = mimetypes.guess_type(str(file_path))
+            
+            # Calculate file hash for integrity checking
+            file_hash = None
+            if file_path.is_file() and stat.st_size < 100 * 1024 * 1024:  # Less than 100MB
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_hash = hashlib.md5(f.read()).hexdigest()
+                except:
+                    pass
+            
+            return {
+                'path': str(file_path),
+                'name': file_path.name,
+                'suffix': file_path.suffix,
+                'size': stat.st_size,
+                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                'mime_type': mime_type,
+                'is_file': file_path.is_file(),
+                'is_dir': file_path.is_dir(),
+                'permissions': oct(stat.st_mode)[-3:],
+                'hash': file_hash
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting file info for {file_path}: {str(e)}")
+            return {'path': str(file_path), 'error': str(e)}
+
+    def find_files(self, base_path: Path, pattern: str = "*") -> List[Path]:
+        """Find files matching the specified pattern."""
+        try:
+            files = []
+            
+            if base_path.is_file():
+                # Single file specified
+                files = [base_path]
+            else:
+                # Directory - find matching files
+                files = list(base_path.rglob(pattern))
+                files = [f for f in files if f.is_file()]
+            
+            logger.info(f"Found {len(files)} files matching pattern '{pattern}'")
+            return files
+            
+        except Exception as e:
+            logger.error(f"Error finding files: {str(e)}")
+            return []
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=8),
+        stop=stop_after_attempt(3)
+    )
+    async def copy_file(self, source: Path, destination: Path) -> Dict[str, Any]:
+        """Copy a file with progress tracking."""
+        try:
+            # Ensure destination directory exists
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Get source file info
+            source_info = self.get_file_info(source)
+            start_time = datetime.utcnow()
+            
+            # Copy the file
+            shutil.copy2(source, destination)
+            
+            # Verify copy
+            dest_info = self.get_file_info(destination)
+            
+            result = {
+                'operation': 'copy',
+                'source': str(source),
+                'destination': str(destination),
+                'source_size': source_info.get('size', 0),
+                'dest_size': dest_info.get('size', 0),
+                'success': source_info.get('size') == dest_info.get('size'),
+                'duration': (datetime.utcnow() - start_time).total_seconds(),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            if result['success']:
+                logger.info(f"Successfully copied {source} -> {destination}")
+            else:
+                logger.error(f"Copy verification failed: size mismatch")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error copying {source} -> {destination}: {str(e)}")
+            return {
+                'operation': 'copy',
+                'source': str(source),
+                'destination': str(destination),
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    async def compress_files(self, files: List[Path], output_file: Path) -> Dict[str, Any]:
+        """Compress files into a ZIP archive."""
+        try:
+            import zipfile
+            
+            start_time = datetime.utcnow()
+            total_size = sum(f.stat().st_size for f in files if f.is_file())
+            
+            with zipfile.ZipFile(output_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for file_path in files:
+                    if file_path.is_file():
+                        # Use relative path in archive
+                        arcname = file_path.name
+                        zf.write(file_path, arcname)
+            
+            compressed_size = output_file.stat().st_size
+            compression_ratio = (1 - compressed_size / total_size) * 100 if total_size > 0 else 0
+            
+            result = {
+                'operation': 'compress',
+                'input_files': len(files),
+                'output_file': str(output_file),
+                'original_size': total_size,
+                'compressed_size': compressed_size,
+                'compression_ratio': round(compression_ratio, 2),
+                'duration': (datetime.utcnow() - start_time).total_seconds(),
+                'success': True,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            logger.info(f"Compressed {len(files)} files to {output_file} ({compression_ratio:.1f}% reduction)")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error compressing files: {str(e)}")
+            return {
+                'operation': 'compress',
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    async def analyze_files(self, files: List[Path]) -> Dict[str, Any]:
+        """Analyze files and generate statistics."""
+        try:
+            analysis = {
+                'total_files': len(files),
+                'total_size': 0,
+                'file_types': {},
+                'size_distribution': {'small': 0, 'medium': 0, 'large': 0},
+                'oldest_file': None,
+                'newest_file': None,
+                'largest_file': None,
+                'file_details': []
+            }
+            
+            oldest_time = float('inf')
+            newest_time = 0
+            largest_size = 0
+            
+            for file_path in files:
+                file_info = self.get_file_info(file_path)
+                analysis['file_details'].append(file_info)
+                
+                # Update totals
+                if 'size' in file_info:
+                    analysis['total_size'] += file_info['size']
+                    
+                    # Size distribution
+                    size = file_info['size']
+                    if size < 1024 * 1024:  # < 1MB
+                        analysis['size_distribution']['small'] += 1
+                    elif size < 50 * 1024 * 1024:  # < 50MB
+                        analysis['size_distribution']['medium'] += 1
+                    else:
+                        analysis['size_distribution']['large'] += 1
+                    
+                    # Track largest file
+                    if size > largest_size:
+                        largest_size = size
+                        analysis['largest_file'] = file_info
+                
+                # File type distribution
+                suffix = file_path.suffix.lower()
+                analysis['file_types'][suffix] = analysis['file_types'].get(suffix, 0) + 1
+                
+                # Track oldest/newest files
+                try:
+                    mtime = file_path.stat().st_mtime
+                    if mtime < oldest_time:
+                        oldest_time = mtime
+                        analysis['oldest_file'] = file_info
+                    if mtime > newest_time:
+                        newest_time = mtime
+                        analysis['newest_file'] = file_info
+                except:
+                    pass
+            
+            # Add summary statistics
+            analysis['average_size'] = analysis['total_size'] / len(files) if files else 0
+            analysis['total_size_mb'] = round(analysis['total_size'] / (1024 * 1024), 2)
+            analysis['timestamp'] = datetime.utcnow().isoformat()
+            
+            logger.info(f"Analyzed {len(files)} files, total size: {analysis['total_size_mb']} MB")
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Error analyzing files: {str(e)}")
+            return {
+                'operation': 'analyze',
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    async def transform_file(self, file_path: Path, rules: Dict[str, Any]) -> Dict[str, Any]:
+        """Transform a file based on rules."""
+        try:
+            result = {
+                'operation': 'transform',
+                'input_file': str(file_path),
+                'success': False,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            # Text file transformations
+            if file_path.suffix.lower() in ['.txt', '.csv', '.json', '.log']:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                original_length = len(content)
+                
+                # Apply transformations
+                if 'replace' in rules:
+                    for old, new in rules['replace'].items():
+                        content = content.replace(old, new)
+                
+                if 'uppercase' in rules and rules['uppercase']:
+                    content = content.upper()
+                
+                if 'lowercase' in rules and rules['lowercase']:
+                    content = content.lower()
+                
+                # Save transformed content
+                output_file = file_path
+                if self.output_path:
+                    output_file = self.output_path / file_path.name
+                
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                result.update({
+                    'output_file': str(output_file),
+                    'original_length': original_length,
+                    'transformed_length': len(content),
+                    'success': True
+                })
+            
+            else:
+                result['error'] = f"Transformation not supported for file type: {file_path.suffix}"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error transforming {file_path}: {str(e)}")
+            return {
+                'operation': 'transform',
+                'input_file': str(file_path),
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    async def process_files(self) -> List[Dict[str, Any]]:
+        """Process files based on the configured operation."""
+        try:
+            # Find files to process
+            files = self.find_files(self.input_path, self.file_pattern)
+            
+            if not files:
+                logger.warning("No files found to process")
+                return []
+            
+            results = []
+            
+            if self.operation == 'copy':
+                if not self.output_path:
+                    raise ValueError("Output path required for copy operation")
+                
+                for file_path in files:
+                    dest_file = self.output_path / file_path.name
+                    result = await self.copy_file(file_path, dest_file)
+                    results.append(result)
+            
+            elif self.operation == 'compress':
+                if not self.output_path:
+                    output_file = self.input_path.parent / f"{self.input_path.name}_compressed.zip"
+                else:
+                    output_file = self.output_path / "compressed_files.zip"
+                
+                result = await self.compress_files(files, output_file)
+                results.append(result)
+            
+            elif self.operation == 'analyze':
+                result = await self.analyze_files(files)
+                results.append(result)
+            
+            elif self.operation == 'transform':
+                for file_path in files:
+                    result = await self.transform_file(file_path, self.transformation_rules)
+                    results.append(result)
+            
+            else:
+                raise ValueError(f"Operation '{self.operation}' not implemented")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error processing files: {str(e)}")
+            return [{
+                'operation': self.operation,
+                'success': False,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }]
+
+    async def execute(self) -> Any:
+        """Main execution - process files according to operation."""
+        logger.info(f"Starting file processing operation: {self.operation}")
+        
+        try:
+            # Process files
+            results = await self.process_files()
+            
+            # Store results
+            self.processed_files.extend(results)
+            
+            # Save processing results
+            self.save_state({
+                'operation': self.operation,
+                'processed_files': results,
+                'summary': {
+                    'total_operations': len(results),
+                    'successful': len([r for r in results if r.get('success', False)]),
+                    'failed': len([r for r in results if not r.get('success', False)])
+                },
+                'completed_at': datetime.utcnow().isoformat()
+            })
+            
+            logger.info(f"File processing completed - {len(results)} operations")
+            
+            return {
+                'status': 'completed',
+                'operation': self.operation,
+                'results': results,
+                'input_path': str(self.input_path),
+                'output_path': str(self.output_path) if self.output_path else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in file processing execution: {str(e)}")
+            return {
+                'status': 'failed',
+                'error': str(e),
+                'operation': self.operation
+            }
+
+    async def cleanup(self) -> None:
+        """Cleanup resources."""
+        try:
+            self.running = False
+            
+            # Save final results
+            if self.processed_files:
+                self.save_state({
+                    'final_results': self.processed_files,
+                    'processing_completed': datetime.utcnow().isoformat()
+                })
+            
+            logger.info("File processor cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            raise

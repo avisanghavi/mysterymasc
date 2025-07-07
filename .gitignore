@@ -1,0 +1,46 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+logs/
+tmp/
+dump.rdb
+
+# Node (if needed)
+node_modules/
+
+# Docker
+.docker/
+
+# Generated agent files
+generated_agents/
+agent_outputs/
+sandbox_*/ 

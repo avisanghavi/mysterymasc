@@ -1,0 +1,388 @@
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Union
+import json
+from urllib.parse import urljoin, urlparse
+
+from base_agent import SandboxAgent
+import aiohttp
+from bs4 import BeautifulSoup
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+
+class {{ agent_name | class_name }}Agent(SandboxAgent):
+    """{{ template_info.description }}"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "{{ agent_name }}"
+        self.version = "1.0.0"
+        self.capabilities = {{ template_info.capabilities }}
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.running: bool = True
+        self.scraped_data: List[Dict[str, Any]] = []
+        
+        # Configuration
+        self.target_url = "{{ target_url }}"
+        self.scrape_interval = {{ scrape_interval | default(3600) }}  # seconds
+        {%- if css_selectors %}
+        self.css_selectors = {{ css_selectors | tojson }}
+        {%- else %}
+        self.css_selectors = {}
+        {%- endif %}
+        {%- if xpath_selectors %}
+        self.xpath_selectors = {{ xpath_selectors | tojson }}
+        {%- else %}
+        self.xpath_selectors = {}
+        {%- endif %}
+        {%- if headers %}
+        self.headers = {{ headers | tojson }}
+        {%- else %}
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; HeyJarvis-Bot/1.0; +https://heyjarvis.ai/bot)"
+        }
+        {%- endif %}
+        {%- if cookies %}
+        self.cookies = {{ cookies | tojson }}
+        {%- else %}
+        self.cookies = {}
+        {%- endif %}
+
+    async def initialize(self) -> None:
+        """Initialize HTTP session and validate target URL."""
+        try:
+            # Create aiohttp session with custom settings
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            connector = aiohttp.TCPConnector(
+                limit=10,
+                limit_per_host=5,
+                keepalive_timeout=30
+            )
+            
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                headers=self.headers,
+                cookies=self.cookies
+            )
+            
+            # Validate target URL
+            await self.validate_url(self.target_url)
+            
+            logger.info(f"Web scraper initialized for: {self.target_url}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize web scraper: {str(e)}")
+            raise
+
+    async def validate_url(self, url: str) -> None:
+        """Validate that the URL is accessible."""
+        try:
+            async with self.session.head(url) as response:
+                if response.status >= 400:
+                    logger.warning(f"URL returned status {response.status}: {url}")
+                else:
+                    logger.info(f"URL validation successful: {url}")
+                    
+        except Exception as e:
+            logger.warning(f"URL validation failed: {str(e)}")
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(3)
+    )
+    async def fetch_page(self, url: str) -> str:
+        """
+        Fetch a web page and return HTML content.
+        
+        Args:
+            url: URL to fetch
+            
+        Returns:
+            HTML content as string
+        """
+        try:
+            logger.debug(f"Fetching: {url}")
+            
+            async with self.session.get(url) as response:
+                response.raise_for_status()
+                
+                # Check content type
+                content_type = response.headers.get('content-type', '')
+                if 'text/html' not in content_type.lower():
+                    logger.warning(f"Non-HTML content type: {content_type}")
+                
+                html_content = await response.text()
+                logger.info(f"Successfully fetched {len(html_content)} characters from {url}")
+                
+                return html_content
+                
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP error fetching {url}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching {url}: {str(e)}")
+            raise
+
+    def extract_data_with_css(self, html: str, selectors: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Extract data using CSS selectors.
+        
+        Args:
+            html: HTML content
+            selectors: Dictionary of field_name -> css_selector
+            
+        Returns:
+            Extracted data dictionary
+        """
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            extracted = {}
+            
+            for field_name, selector in selectors.items():
+                try:
+                    elements = soup.select(selector)
+                    
+                    if not elements:
+                        extracted[field_name] = None
+                        logger.debug(f"No elements found for selector '{selector}'")
+                        continue
+                    
+                    # Extract text from all matching elements
+                    if len(elements) == 1:
+                        extracted[field_name] = elements[0].get_text(strip=True)
+                    else:
+                        extracted[field_name] = [elem.get_text(strip=True) for elem in elements]
+                        
+                except Exception as e:
+                    logger.error(f"Error extracting '{field_name}' with selector '{selector}': {str(e)}")
+                    extracted[field_name] = None
+            
+            return extracted
+            
+        except Exception as e:
+            logger.error(f"Error parsing HTML with CSS selectors: {str(e)}")
+            return {}
+
+    def extract_links(self, html: str, base_url: str) -> List[Dict[str, str]]:
+        """Extract all links from the page."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            links = []
+            
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                text = link.get_text(strip=True)
+                
+                # Convert relative URLs to absolute
+                absolute_url = urljoin(base_url, href)
+                
+                links.append({
+                    'url': absolute_url,
+                    'text': text,
+                    'title': link.get('title', ''),
+                    'rel': link.get('rel', [])
+                })
+            
+            logger.info(f"Extracted {len(links)} links")
+            return links
+            
+        except Exception as e:
+            logger.error(f"Error extracting links: {str(e)}")
+            return []
+
+    def extract_images(self, html: str, base_url: str) -> List[Dict[str, str]]:
+        """Extract all images from the page."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            images = []
+            
+            for img in soup.find_all('img', src=True):
+                src = img['src']
+                alt = img.get('alt', '')
+                
+                # Convert relative URLs to absolute
+                absolute_url = urljoin(base_url, src)
+                
+                images.append({
+                    'url': absolute_url,
+                    'alt': alt,
+                    'title': img.get('title', ''),
+                    'width': img.get('width', ''),
+                    'height': img.get('height', '')
+                })
+            
+            logger.info(f"Extracted {len(images)} images")
+            return images
+            
+        except Exception as e:
+            logger.error(f"Error extracting images: {str(e)}")
+            return []
+
+    async def scrape_url(self, url: str) -> Dict[str, Any]:
+        """
+        Scrape a single URL and extract data.
+        
+        Args:
+            url: URL to scrape
+            
+        Returns:
+            Scraped data dictionary
+        """
+        try:
+            # Fetch the page
+            html = await self.fetch_page(url)
+            
+            # Extract basic metadata
+            soup = BeautifulSoup(html, 'html.parser')
+            title = soup.title.string.strip() if soup.title else ""
+            
+            # Extract meta description
+            meta_desc = ""
+            desc_tag = soup.find('meta', attrs={'name': 'description'})
+            if desc_tag:
+                meta_desc = desc_tag.get('content', '')
+            
+            result = {
+                'url': url,
+                'title': title,
+                'meta_description': meta_desc,
+                'scraped_at': datetime.utcnow().isoformat(),
+                'html_length': len(html)
+            }
+            
+            # Extract data using CSS selectors
+            if self.css_selectors:
+                css_data = self.extract_data_with_css(html, self.css_selectors)
+                result['css_extracted'] = css_data
+            
+            # Extract links and images
+            result['links'] = self.extract_links(html, url)
+            result['images'] = self.extract_images(html, url)
+            
+            # Calculate content statistics
+            text_content = soup.get_text()
+            result['stats'] = {
+                'text_length': len(text_content),
+                'word_count': len(text_content.split()),
+                'link_count': len(result['links']),
+                'image_count': len(result['images'])
+            }
+            
+            logger.info(f"Successfully scraped {url} - {result['stats']['word_count']} words")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error scraping {url}: {str(e)}")
+            return {
+                'url': url,
+                'error': str(e),
+                'scraped_at': datetime.utcnow().isoformat()
+            }
+
+    async def detect_changes(self, current_data: Dict[str, Any], previous_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Detect changes between two scraping results."""
+        changes = {
+            'title_changed': current_data.get('title') != previous_data.get('title'),
+            'meta_description_changed': current_data.get('meta_description') != previous_data.get('meta_description'),
+            'content_length_changed': current_data.get('html_length') != previous_data.get('html_length'),
+            'detected_at': datetime.utcnow().isoformat()
+        }
+        
+        # Check CSS extracted data changes
+        if 'css_extracted' in current_data and 'css_extracted' in previous_data:
+            css_changes = {}
+            current_css = current_data['css_extracted']
+            previous_css = previous_data['css_extracted']
+            
+            for field, current_value in current_css.items():
+                if field in previous_css:
+                    css_changes[f"{field}_changed"] = current_value != previous_css[field]
+            
+            changes['css_changes'] = css_changes
+        
+        return changes
+
+    async def save_data(self, data: Dict[str, Any]) -> None:
+        """Save scraped data to storage."""
+        try:
+            # Add to in-memory storage
+            self.scraped_data.append(data)
+            
+            # Keep only last 100 entries to prevent memory growth
+            if len(self.scraped_data) > 100:
+                self.scraped_data = self.scraped_data[-100:]
+            
+            # Save to file (basic persistence)
+            self.save_state({
+                'scraped_data': self.scraped_data[-10:],  # Save last 10 entries
+                'last_scrape': datetime.utcnow().isoformat()
+            })
+            
+            logger.debug("Data saved successfully")
+            
+        except Exception as e:
+            logger.error(f"Error saving data: {str(e)}")
+
+    async def execute(self) -> Any:
+        """Main execution loop - scrape target URL periodically."""
+        logger.info(f"Starting web scraping loop for {self.target_url}")
+        
+        previous_data = None
+        
+        while self.running:
+            try:
+                # Scrape the target URL
+                current_data = await self.scrape_url(self.target_url)
+                
+                # Detect changes if we have previous data
+                if previous_data and 'error' not in current_data:
+                    changes = await self.detect_changes(current_data, previous_data)
+                    current_data['changes'] = changes
+                    
+                    # Log significant changes
+                    if any(changes.get(key, False) for key in changes if key.endswith('_changed')):
+                        logger.info(f"Changes detected on {self.target_url}")
+                
+                # Save the data
+                await self.save_data(current_data)
+                previous_data = current_data
+                
+                logger.debug(f"Completed scraping cycle for {self.target_url}")
+                
+                # Wait for next scrape
+                await asyncio.sleep(self.scrape_interval)
+                
+            except Exception as e:
+                logger.error(f"Error in scraping loop: {str(e)}")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+        
+        return {
+            "status": "scraping_stopped",
+            "total_scrapes": len(self.scraped_data),
+            "target_url": self.target_url
+        }
+
+    async def cleanup(self) -> None:
+        """Cleanup resources."""
+        try:
+            self.running = False
+            
+            if self.session:
+                await self.session.close()
+            
+            # Save final data
+            if self.scraped_data:
+                self.save_state({
+                    'final_scraped_data': self.scraped_data,
+                    'scraping_completed': datetime.utcnow().isoformat()
+                })
+            
+            logger.info("Web scraper cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            raise

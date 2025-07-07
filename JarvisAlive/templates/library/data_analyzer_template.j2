@@ -1,0 +1,565 @@
+import asyncio
+import logging
+import json
+import csv
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union
+import statistics
+
+from base_agent import SandboxAgent
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+
+class {{ agent_name | class_name }}Agent(SandboxAgent):
+    """{{ template_info.description }}"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "{{ agent_name }}"
+        self.version = "1.0.0"
+        self.capabilities = {{ template_info.capabilities }}
+        self.running: bool = True
+        self.analysis_results: List[Dict[str, Any]] = []
+        
+        # Configuration
+        self.data_source = "{{ data_source }}"
+        self.analysis_type = "{{ analysis_type }}"
+        {%- if metrics %}
+        self.metrics = {{ metrics | tojson }}
+        {%- else %}
+        self.metrics = ["mean", "median", "std", "min", "max", "count"]
+        {%- endif %}
+        {%- if chart_types %}
+        self.chart_types = {{ chart_types | tojson }}
+        {%- else %}
+        self.chart_types = ["histogram", "line", "bar"]
+        {%- endif %}
+        {%- if export_format %}
+        self.export_format = "{{ export_format }}"
+        {%- else %}
+        self.export_format = "json"
+        {%- endif %}
+
+    async def initialize(self) -> None:
+        """Initialize data analyzer and validate data source."""
+        try:
+            # Validate data source
+            if self.data_source.startswith('http'):
+                # URL data source
+                await self.validate_url_source(self.data_source)
+            elif Path(self.data_source).exists():
+                # File data source
+                self.validate_file_source(Path(self.data_source))
+            else:
+                # Assume it's a data string or will be provided later
+                logger.info("Data source will be provided during execution")
+            
+            # Validate analysis type
+            valid_types = [
+                'descriptive', 'trend', 'correlation', 'anomaly', 
+                'distribution', 'time_series', 'comparison', 'custom'
+            ]
+            if self.analysis_type not in valid_types:
+                raise ValueError(f"Invalid analysis type '{self.analysis_type}'. Valid: {valid_types}")
+            
+            logger.info(f"Data analyzer initialized - Type: {self.analysis_type}")
+            logger.info(f"Data source: {self.data_source}")
+            logger.info(f"Metrics: {self.metrics}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize data analyzer: {str(e)}")
+            raise
+
+    async def validate_url_source(self, url: str) -> None:
+        """Validate URL data source."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.head(url) as response:
+                    if response.status >= 400:
+                        raise ValueError(f"URL returned status {response.status}: {url}")
+            logger.info(f"URL data source validated: {url}")
+        except Exception as e:
+            logger.error(f"URL validation failed: {str(e)}")
+            raise
+
+    def validate_file_source(self, file_path: Path) -> None:
+        """Validate file data source."""
+        if not file_path.exists():
+            raise FileNotFoundError(f"Data file not found: {file_path}")
+        
+        if not file_path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+        
+        # Check file format
+        supported_formats = ['.json', '.csv', '.txt', '.log']
+        if file_path.suffix.lower() not in supported_formats:
+            logger.warning(f"Unsupported file format: {file_path.suffix}")
+        
+        logger.info(f"File data source validated: {file_path}")
+
+    async def load_data(self, source: str) -> List[Dict[str, Any]]:
+        """Load data from various sources."""
+        try:
+            if source.startswith('http'):
+                return await self.load_from_url(source)
+            elif Path(source).exists():
+                return await self.load_from_file(Path(source))
+            else:
+                # Try to parse as JSON
+                try:
+                    data = json.loads(source)
+                    if isinstance(data, list):
+                        return data
+                    else:
+                        return [data]
+                except:
+                    raise ValueError(f"Unable to load data from source: {source}")
+            
+        except Exception as e:
+            logger.error(f"Error loading data: {str(e)}")
+            raise
+
+    async def load_from_url(self, url: str) -> List[Dict[str, Any]]:
+        """Load data from URL."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    content_type = response.headers.get('content-type', '')
+                    
+                    if 'application/json' in content_type:
+                        data = await response.json()
+                    else:
+                        text = await response.text()
+                        data = json.loads(text)
+                    
+                    if isinstance(data, list):
+                        return data
+                    else:
+                        return [data]
+                        
+        except Exception as e:
+            logger.error(f"Error loading from URL {url}: {str(e)}")
+            raise
+
+    async def load_from_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Load data from file."""
+        try:
+            data = []
+            
+            if file_path.suffix.lower() == '.json':
+                with open(file_path, 'r') as f:
+                    content = json.load(f)
+                    if isinstance(content, list):
+                        data = content
+                    else:
+                        data = [content]
+            
+            elif file_path.suffix.lower() == '.csv':
+                with open(file_path, 'r') as f:
+                    reader = csv.DictReader(f)
+                    data = list(reader)
+            
+            else:
+                # Try to parse each line as JSON
+                with open(file_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                data.append(json.loads(line))
+                            except:
+                                # Fall back to treating as text
+                                data.append({'text': line})
+            
+            logger.info(f"Loaded {len(data)} records from {file_path}")
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error loading from file {file_path}: {str(e)}")
+            raise
+
+    def extract_numeric_values(self, data: List[Dict[str, Any]], field: str) -> List[float]:
+        """Extract numeric values from a field."""
+        values = []
+        for record in data:
+            try:
+                value = record.get(field)
+                if value is not None:
+                    # Try to convert to float
+                    if isinstance(value, (int, float)):
+                        values.append(float(value))
+                    elif isinstance(value, str):
+                        # Try to parse numeric string
+                        try:
+                            values.append(float(value))
+                        except:
+                            pass
+            except:
+                continue
+        return values
+
+    def calculate_descriptive_stats(self, values: List[float]) -> Dict[str, float]:
+        """Calculate descriptive statistics."""
+        if not values:
+            return {}
+        
+        try:
+            stats = {
+                'count': len(values),
+                'sum': sum(values),
+                'mean': statistics.mean(values),
+                'median': statistics.median(values),
+                'mode': statistics.mode(values) if len(set(values)) < len(values) else None,
+                'min': min(values),
+                'max': max(values),
+                'range': max(values) - min(values),
+                'std': statistics.stdev(values) if len(values) > 1 else 0,
+                'variance': statistics.variance(values) if len(values) > 1 else 0
+            }
+            
+            # Percentiles
+            sorted_values = sorted(values)
+            n = len(sorted_values)
+            stats.update({
+                'q1': sorted_values[n // 4] if n >= 4 else sorted_values[0],
+                'q3': sorted_values[3 * n // 4] if n >= 4 else sorted_values[-1],
+                'p90': sorted_values[int(0.9 * n)] if n >= 10 else sorted_values[-1],
+                'p95': sorted_values[int(0.95 * n)] if n >= 20 else sorted_values[-1],
+                'p99': sorted_values[int(0.99 * n)] if n >= 100 else sorted_values[-1]
+            })
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error calculating stats: {str(e)}")
+            return {'error': str(e)}
+
+    def detect_anomalies(self, values: List[float], method: str = 'iqr') -> Dict[str, Any]:
+        """Detect anomalies in numeric data."""
+        if len(values) < 4:
+            return {'anomalies': [], 'method': method, 'reason': 'insufficient_data'}
+        
+        try:
+            anomalies = []
+            
+            if method == 'iqr':
+                # Interquartile Range method
+                q1 = statistics.quantiles(values, n=4)[0]
+                q3 = statistics.quantiles(values, n=4)[2]
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                
+                for i, value in enumerate(values):
+                    if value < lower_bound or value > upper_bound:
+                        anomalies.append({
+                            'index': i,
+                            'value': value,
+                            'type': 'low' if value < lower_bound else 'high'
+                        })
+            
+            elif method == 'zscore':
+                # Z-score method
+                mean = statistics.mean(values)
+                std = statistics.stdev(values) if len(values) > 1 else 0
+                
+                if std > 0:
+                    for i, value in enumerate(values):
+                        z_score = abs((value - mean) / std)
+                        if z_score > 3:  # 3 standard deviations
+                            anomalies.append({
+                                'index': i,
+                                'value': value,
+                                'z_score': z_score,
+                                'type': 'outlier'
+                            })
+            
+            return {
+                'anomalies': anomalies,
+                'method': method,
+                'total_anomalies': len(anomalies),
+                'anomaly_percentage': (len(anomalies) / len(values)) * 100
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting anomalies: {str(e)}")
+            return {'error': str(e)}
+
+    def analyze_time_series(self, data: List[Dict[str, Any]], time_field: str, value_field: str) -> Dict[str, Any]:
+        """Analyze time series data."""
+        try:
+            # Extract time-value pairs
+            time_series = []
+            for record in data:
+                try:
+                    time_str = record.get(time_field)
+                    value = record.get(value_field)
+                    
+                    if time_str and value is not None:
+                        # Parse time (try different formats)
+                        time_obj = None
+                        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%Y-%m-%dT%H:%M:%S']:
+                            try:
+                                time_obj = datetime.strptime(time_str, fmt)
+                                break
+                            except:
+                                continue
+                        
+                        if time_obj:
+                            time_series.append((time_obj, float(value)))
+                except:
+                    continue
+            
+            if not time_series:
+                return {'error': 'No valid time series data found'}
+            
+            # Sort by time
+            time_series.sort(key=lambda x: x[0])
+            
+            # Calculate trends and patterns
+            values = [v for _, v in time_series]
+            times = [t for t, _ in time_series]
+            
+            # Basic trend analysis
+            if len(values) > 1:
+                # Simple linear trend
+                x_vals = list(range(len(values)))
+                n = len(values)
+                sum_x = sum(x_vals)
+                sum_y = sum(values)
+                sum_xy = sum(x * y for x, y in zip(x_vals, values))
+                sum_x2 = sum(x * x for x in x_vals)
+                
+                slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+                trend = 'increasing' if slope > 0 else 'decreasing' if slope < 0 else 'stable'
+            else:
+                slope = 0
+                trend = 'stable'
+            
+            return {
+                'data_points': len(time_series),
+                'time_range': {
+                    'start': times[0].isoformat(),
+                    'end': times[-1].isoformat(),
+                    'duration_hours': (times[-1] - times[0]).total_seconds() / 3600
+                },
+                'trend': trend,
+                'slope': slope,
+                'stats': self.calculate_descriptive_stats(values),
+                'first_value': values[0],
+                'last_value': values[-1],
+                'value_change': values[-1] - values[0],
+                'percent_change': ((values[-1] - values[0]) / values[0]) * 100 if values[0] != 0 else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing time series: {str(e)}")
+            return {'error': str(e)}
+
+    async def perform_analysis(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Perform the specified analysis on the data."""
+        try:
+            analysis_result = {
+                'analysis_type': self.analysis_type,
+                'data_summary': {
+                    'total_records': len(data),
+                    'fields': list(data[0].keys()) if data else [],
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            }
+            
+            if self.analysis_type == 'descriptive':
+                # Descriptive statistics for all numeric fields
+                numeric_analysis = {}
+                if data:
+                    for field in data[0].keys():
+                        values = self.extract_numeric_values(data, field)
+                        if values:
+                            numeric_analysis[field] = self.calculate_descriptive_stats(values)
+                analysis_result['descriptive_stats'] = numeric_analysis
+            
+            elif self.analysis_type == 'anomaly':
+                # Anomaly detection for numeric fields
+                anomaly_analysis = {}
+                if data:
+                    for field in data[0].keys():
+                        values = self.extract_numeric_values(data, field)
+                        if len(values) >= 4:
+                            anomaly_analysis[field] = self.detect_anomalies(values)
+                analysis_result['anomaly_detection'] = anomaly_analysis
+            
+            elif self.analysis_type == 'time_series':
+                # Time series analysis (requires time and value fields)
+                time_fields = ['timestamp', 'time', 'date', 'created_at']
+                value_fields = ['value', 'amount', 'count', 'price', 'score']
+                
+                time_field = None
+                value_field = None
+                
+                if data:
+                    for tf in time_fields:
+                        if tf in data[0]:
+                            time_field = tf
+                            break
+                    
+                    for vf in value_fields:
+                        if vf in data[0]:
+                            value_field = vf
+                            break
+                
+                if time_field and value_field:
+                    analysis_result['time_series'] = self.analyze_time_series(data, time_field, value_field)
+                else:
+                    analysis_result['error'] = 'Time series analysis requires time and value fields'
+            
+            elif self.analysis_type == 'distribution':
+                # Distribution analysis
+                distribution_analysis = {}
+                if data:
+                    for field in data[0].keys():
+                        values = self.extract_numeric_values(data, field)
+                        if values:
+                            # Create histogram
+                            min_val, max_val = min(values), max(values)
+                            if min_val != max_val:
+                                bins = 10
+                                bin_width = (max_val - min_val) / bins
+                                histogram = {}
+                                for i in range(bins):
+                                    bin_start = min_val + i * bin_width
+                                    bin_end = bin_start + bin_width
+                                    count = len([v for v in values if bin_start <= v < bin_end])
+                                    histogram[f"{bin_start:.2f}-{bin_end:.2f}"] = count
+                                
+                                distribution_analysis[field] = {
+                                    'histogram': histogram,
+                                    'stats': self.calculate_descriptive_stats(values)
+                                }
+                
+                analysis_result['distribution'] = distribution_analysis
+            
+            logger.info(f"Completed {self.analysis_type} analysis on {len(data)} records")
+            return analysis_result
+            
+        except Exception as e:
+            logger.error(f"Error performing analysis: {str(e)}")
+            return {
+                'analysis_type': self.analysis_type,
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    async def export_results(self, results: Dict[str, Any]) -> str:
+        """Export analysis results in the specified format."""
+        try:
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            filename = f"analysis_results_{timestamp}.{self.export_format}"
+            
+            if self.export_format == 'json':
+                content = json.dumps(results, indent=2, default=str)
+            elif self.export_format == 'csv':
+                # Flatten results for CSV export
+                import csv
+                import io
+                output = io.StringIO()
+                
+                # Extract key metrics for CSV
+                if 'descriptive_stats' in results:
+                    writer = csv.writer(output)
+                    writer.writerow(['Field', 'Count', 'Mean', 'Median', 'Std', 'Min', 'Max'])
+                    
+                    for field, stats in results['descriptive_stats'].items():
+                        if isinstance(stats, dict) and 'count' in stats:
+                            writer.writerow([
+                                field,
+                                stats.get('count', ''),
+                                stats.get('mean', ''),
+                                stats.get('median', ''),
+                                stats.get('std', ''),
+                                stats.get('min', ''),
+                                stats.get('max', '')
+                            ])
+                
+                content = output.getvalue()
+            else:
+                content = str(results)
+            
+            # Save to state for persistence
+            self.save_state({
+                'exported_results': {
+                    'filename': filename,
+                    'format': self.export_format,
+                    'content': content,
+                    'exported_at': datetime.utcnow().isoformat()
+                }
+            })
+            
+            logger.info(f"Results exported to {filename}")
+            return filename
+            
+        except Exception as e:
+            logger.error(f"Error exporting results: {str(e)}")
+            return ""
+
+    async def execute(self) -> Any:
+        """Main execution - load data and perform analysis."""
+        logger.info(f"Starting data analysis: {self.analysis_type}")
+        
+        try:
+            # Load data
+            data = await self.load_data(self.data_source)
+            
+            if not data:
+                raise ValueError("No data loaded for analysis")
+            
+            # Perform analysis
+            results = await self.perform_analysis(data)
+            
+            # Export results
+            export_file = await self.export_results(results)
+            
+            # Store results
+            self.analysis_results.append(results)
+            
+            logger.info(f"Data analysis completed - {len(data)} records analyzed")
+            
+            return {
+                'status': 'completed',
+                'analysis_type': self.analysis_type,
+                'data_source': self.data_source,
+                'records_analyzed': len(data),
+                'results': results,
+                'export_file': export_file
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in data analysis execution: {str(e)}")
+            return {
+                'status': 'failed',
+                'error': str(e),
+                'analysis_type': self.analysis_type
+            }
+
+    async def cleanup(self) -> None:
+        """Cleanup resources."""
+        try:
+            self.running = False
+            
+            # Save final results
+            if self.analysis_results:
+                self.save_state({
+                    'final_analysis_results': self.analysis_results,
+                    'analysis_completed': datetime.utcnow().isoformat()
+                })
+            
+            logger.info("Data analyzer cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            raise
