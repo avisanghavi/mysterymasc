@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HeyJarvis Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: #2d2d2d;
+            padding: 1rem;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            background: linear-gradient(45deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .mode-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid #404040;
+            background: #2d2d2d;
+            color: #ffffff;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            background: #3b82f6;
+            border-color: #3b82f6;
+        }
+
+        .mode-btn:hover {
+            background: #404040;
+        }
+
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 800px;
+            margin: 0 auto;
+            width: 100%;
+            padding: 1rem;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem 0;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 0.75rem 1rem;
+            border-radius: 1rem;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .user-message {
+            align-self: flex-end;
+            background: linear-gradient(45deg, #3b82f6, #1d4ed8);
+            color: white;
+        }
+
+        .bot-message {
+            align-self: flex-start;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+        }
+
+        .system-message {
+            align-self: center;
+            background: #374151;
+            font-size: 0.875rem;
+            font-style: italic;
+            max-width: 60%;
+            text-align: center;
+        }
+
+        .progress-message {
+            align-self: flex-start;
+            background: #1f2937;
+            border: 1px solid #374151;
+            max-width: 90%;
+        }
+
+        .error-message {
+            align-self: flex-start;
+            background: #7f1d1d;
+            border: 1px solid #dc2626;
+            max-width: 80%;
+        }
+
+        .success-message {
+            align-self: flex-start;
+            background: #14532d;
+            border: 1px solid #16a34a;
+            max-width: 80%;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #374151;
+            border-radius: 3px;
+            margin-top: 0.5rem;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .input-container {
+            padding: 1rem;
+            border-top: 1px solid #404040;
+            background: #2d2d2d;
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 0.5rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 0.75rem;
+            border: 1px solid #404040;
+            border-radius: 0.5rem;
+            background: #1a1a1a;
+            color: #ffffff;
+            resize: none;
+            min-height: 2.5rem;
+            max-height: 8rem;
+            font-family: inherit;
+        }
+
+        .message-input:focus {
+            outline: none;
+            border-color: #3b82f6;
+        }
+
+        .send-btn {
+            padding: 0.75rem 1.5rem;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .send-btn:hover:not(:disabled) {
+            background: #2563eb;
+        }
+
+        .send-btn:disabled {
+            background: #6b7280;
+            cursor: not-allowed;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            padding: 0.5rem;
+            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+            z-index: 1000;
+        }
+
+        .connected {
+            background: #10b981;
+        }
+
+        .disconnected {
+            background: #ef4444;
+        }
+
+        .agent-card {
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-top: 0.5rem;
+        }
+
+        .agent-title {
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            color: #60a5fa;
+        }
+
+        .capabilities {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            margin-top: 0.5rem;
+        }
+
+        .capability-badge {
+            background: #374151;
+            color: #d1d5db;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+        }
+
+        .debug-info {
+            font-size: 0.75rem;
+            color: #6b7280;
+            margin-top: 0.5rem;
+            font-family: monospace;
+            background: #111;
+            padding: 0.5rem;
+            border-radius: 0.25rem;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        @media (max-width: 768px) {
+            .chat-container {
+                padding: 0.5rem;
+            }
+            
+            .message {
+                max-width: 90%;
+            }
+            
+            .mode-selector {
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+            
+            .mode-btn {
+                padding: 0.375rem 0.75rem;
+                font-size: 0.875rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-status disconnected" id="connectionStatus"></div>
+    
+    <header class="header">
+        <div class="logo">🤖 HeyJarvis</div>
+        <div class="mode-selector">
+            <button class="mode-btn active" data-mode="agent-builder" id="agentBuilderBtn">
+                🔧 Agent Builder
+            </button>
+            <button class="mode-btn" data-mode="jarvis" id="jarvisBtn">
+                🎯 Jarvis Business
+            </button>
+        </div>
+    </header>
+
+    <div class="chat-container">
+        <div class="messages" id="messages"></div>
+    </div>
+
+    <div class="input-container">
+        <div class="input-wrapper">
+            <textarea 
+                id="messageInput" 
+                class="message-input" 
+                placeholder="Describe the automation you want to create..."
+                rows="1"
+            ></textarea>
+            <button id="sendBtn" class="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script>
+        class HeyJarvisChat {
+            constructor() {
+                this.ws = null;
+                this.sessionId = this.generateSessionId();
+                this.currentMode = 'agent-builder';
+                this.isProcessing = false;
+                this.debugMode = false; // Set to true to see raw messages
+                
+                this.initializeElements();
+                this.setupEventListeners();
+                this.connect();
+            }
+
+            generateSessionId() {
+                return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            initializeElements() {
+                this.messagesContainer = document.getElementById('messages');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendBtn = document.getElementById('sendBtn');
+                this.connectionStatus = document.getElementById('connectionStatus');
+                this.agentBuilderBtn = document.getElementById('agentBuilderBtn');
+                this.jarvisBtn = document.getElementById('jarvisBtn');
+            }
+
+            setupEventListeners() {
+                this.sendBtn.addEventListener('click', () => this.sendMessage());
+                
+                this.messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                this.messageInput.addEventListener('input', () => {
+                    this.autoResize();
+                });
+
+                this.agentBuilderBtn.addEventListener('click', () => this.setMode('agent-builder'));
+                this.jarvisBtn.addEventListener('click', () => this.setMode('jarvis'));
+
+                // Debug toggle - press 'D' to toggle debug mode
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'D' && e.ctrlKey) {
+                        this.debugMode = !this.debugMode;
+                        this.addMessage('system', `Debug mode ${this.debugMode ? 'enabled' : 'disabled'}`);
+                    }
+                });
+            }
+
+            autoResize() {
+                this.messageInput.style.height = 'auto';
+                this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 128) + 'px';
+            }
+
+            setMode(mode) {
+                this.currentMode = mode;
+                
+                // Update button states
+                this.agentBuilderBtn.classList.toggle('active', mode === 'agent-builder');
+                this.jarvisBtn.classList.toggle('active', mode === 'jarvis');
+                
+                // Update placeholder
+                const placeholders = {
+                    'agent-builder': 'Describe the automation you want to create...',
+                    'jarvis': 'What business goal would you like to achieve?'
+                };
+                this.messageInput.placeholder = placeholders[mode];
+                
+                this.addMessage('system', `Switched to ${mode === 'agent-builder' ? 'Agent Builder' : 'Jarvis Business'} mode`);
+            }
+
+            connect() {
+                const wsUrl = `ws://localhost:8000/ws/${this.sessionId}`;
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('Connected to HeyJarvis backend');
+                        this.updateConnectionStatus(true);
+                        this.addMessage('system', 'Connected to HeyJarvis. How can I help you today?');
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        console.log('Raw WebSocket message:', event.data);
+                        this.handleWebSocketMessage(event.data);
+                    };
+
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.updateConnectionStatus(false);
+                        this.addMessage('system', 'Connection error. Please check if the backend is running.');
+                    };
+
+                    this.ws.onclose = () => {
+                        console.log('WebSocket connection closed');
+                        this.updateConnectionStatus(false);
+                        this.addMessage('system', 'Connection lost. Attempting to reconnect...');
+                        
+                        // Attempt to reconnect after 3 seconds
+                        setTimeout(() => this.connect(), 3000);
+                    };
+                } catch (error) {
+                    console.error('Failed to create WebSocket connection:', error);
+                    this.updateConnectionStatus(false);
+                    this.addMessage('system', 'Failed to connect to backend. Please ensure the server is running on localhost:8000');
+                }
+            }
+
+            updateConnectionStatus(connected) {
+                this.connectionStatus.className = `connection-status ${connected ? 'connected' : 'disconnected'}`;
+            }
+
+            handleWebSocketMessage(rawData) {
+                try {
+                    // Parse the message
+                    const data = JSON.parse(rawData);
+                    
+                    if (this.debugMode) {
+                        this.addDebugMessage('Received', data);
+                    }
+                    
+                    console.log('Parsed WebSocket message:', data);
+                    
+                    // Handle different message types based on your backend structure
+                    if (data.type) {
+                        this.handleTypedMessage(data);
+                    } else if (data.status) {
+                        this.handleStatusMessage(data);
+                    } else if (data.agent_spec) {
+                        this.handleAgentCreatedMessage(data);
+                    } else if (data.error_message) {
+                        this.handleErrorMessage(data);
+                    } else if (data.deployment_status) {
+                        this.handleDeploymentMessage(data);
+                    } else {
+                        // Fallback for generic messages
+                        this.handleGenericMessage(data);
+                    }
+                    
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                    
+                    // If it's not JSON, treat as plain text
+                    if (typeof rawData === 'string') {
+                        this.addMessage('bot', rawData);
+                    } else {
+                        this.addMessage('system', `Received non-JSON message: ${rawData}`);
+                    }
+                }
+                
+                this.setProcessing(false);
+            }
+
+            handleTypedMessage(data) {
+                switch (data.type) {
+                    case 'agent_created':
+                        this.handleAgentCreated(data);
+                        break;
+                    case 'progress':
+                        this.handleProgress(data);
+                        break;
+                    case 'error':
+                        this.addMessage('bot', `❌ Error: ${data.content}`, 'error');
+                        break;
+                    case 'business_metric_updated':
+                        this.handleBusinessMetric(data);
+                        break;
+                    case 'department_activated':
+                        this.handleDepartmentActivated(data);
+                        break;
+                    case 'workflow_progress':
+                        this.handleWorkflowProgress(data);
+                        break;
+                    default:
+                        this.addMessage('bot', data.content || `Received ${data.type} message`);
+                }
+            }
+
+            handleStatusMessage(data) {
+                const status = data.status;
+                
+                if (status === 'completed' && data.agent_spec) {
+                    this.handleAgentCreatedDirect(data);
+                } else if (status === 'failed') {
+                    const errorMsg = data.error_message || 'Agent creation failed';
+                    this.addMessage('bot', `❌ ${errorMsg}`, 'error');
+                } else if (status === 'pending') {
+                    this.addMessage('bot', '⏳ Processing your request...', 'progress');
+                } else {
+                    this.addMessage('bot', `Status: ${status}`);
+                }
+            }
+
+            handleAgentCreatedMessage(data) {
+                if (data.agent_spec) {
+                    this.handleAgentCreatedDirect(data);
+                } else {
+                    this.addMessage('bot', '✅ Agent created successfully!', 'success');
+                }
+            }
+
+            handleErrorMessage(data) {
+                const errorMsg = data.error_message || 'An error occurred';
+                this.addMessage('bot', `❌ ${errorMsg}`, 'error');
+            }
+
+            handleDeploymentMessage(data) {
+                const status = data.deployment_status;
+                
+                switch (status) {
+                    case 'completed':
+                        if (data.agent_spec) {
+                            this.handleAgentCreatedDirect(data);
+                        } else {
+                            this.addMessage('bot', '✅ Deployment completed successfully!', 'success');
+                        }
+                        break;
+                    case 'failed':
+                        const errorMsg = data.error_message || 'Deployment failed';
+                        this.addMessage('bot', `❌ ${errorMsg}`, 'error');
+                        break;
+                    case 'pending':
+                        this.addMessage('bot', '⏳ Deployment in progress...', 'progress');
+                        break;
+                    default:
+                        this.addMessage('bot', `Deployment status: ${status}`);
+                }
+            }
+
+            handleGenericMessage(data) {
+                // Try to extract meaningful content from various possible structures
+                let content = data.content || data.message || data.result || '';
+                
+                if (!content && data.agent_spec) {
+                    this.handleAgentCreatedDirect(data);
+                    return;
+                }
+                
+                if (!content) {
+                    content = `Received response from HeyJarvis: ${JSON.stringify(data)}`;
+                }
+                
+                this.addMessage('bot', content);
+            }
+
+            handleAgentCreated(data) {
+                const agent = data.details || data.agent_spec;
+                if (!agent) {
+                    this.addMessage('bot', '✅ Agent created successfully!', 'success');
+                    return;
+                }
+                
+                let content = `✅ **Agent Created**: ${agent.name || 'Unnamed Agent'}`;
+                
+                if (agent.description) {
+                    content += `\n\n${agent.description}`;
+                }
+                
+                this.addMessage('bot', content, 'success');
+                this.addAgentCard(agent);
+            }
+
+            handleAgentCreatedDirect(data) {
+                const agent = data.agent_spec;
+                if (!agent) {
+                    this.addMessage('bot', '✅ Agent created successfully!', 'success');
+                    return;
+                }
+                
+                let content = `✅ **Agent Created**: ${agent.name || 'Unnamed Agent'}`;
+                
+                if (agent.description) {
+                    content += `\n\n${agent.description}`;
+                }
+                
+                // Add execution context if available
+                if (data.execution_context) {
+                    const ctx = data.execution_context;
+                    content += `\n\n📍 **Deployment Info**:`;
+                    if (ctx.agent_id) content += `\n• Agent ID: ${ctx.agent_id}`;
+                    if (ctx.endpoint) content += `\n• Endpoint: ${ctx.endpoint}`;
+                    if (ctx.container_id) content += `\n• Container: ${ctx.container_id}`;
+                }
+                
+                // Add Jarvis metadata if available
+                if (data.jarvis_metadata) {
+                    const jarvis = data.jarvis_metadata;
+                    if (jarvis.business_intent) {
+                        const intent = jarvis.business_intent;
+                        content += `\n\n🎯 **Business Context**:`;
+                        content += `\n• Category: ${intent.category}`;
+                        content += `\n• Confidence: ${(intent.confidence * 100).toFixed(0)}%`;
+                        if (intent.estimated_timeline) {
+                            content += `\n• Timeline: ${intent.estimated_timeline}`;
+                        }
+                    }
+                }
+                
+                this.addMessage('bot', content, 'success');
+                this.addAgentCard(agent);
+            }
+
+            handleProgress(data) {
+                const progress = data.details?.progress || 0;
+                const status = data.content || 'Processing...';
+                
+                this.updateOrCreateProgress(progress, status);
+            }
+
+            handleBusinessMetric(data) {
+                const metric = data.details?.metric || 'Unknown metric';
+                const value = data.details?.value || 'N/A';
+                const change = data.details?.change_percentage;
+                
+                let content = `📊 **${metric}**: ${value}`;
+                if (change !== undefined) {
+                    const changeStr = change > 0 ? `+${change.toFixed(1)}%` : `${change.toFixed(1)}%`;
+                    const emoji = change > 0 ? '📈' : '📉';
+                    content += ` ${emoji} (${changeStr})`;
+                }
+                
+                this.addMessage('bot', content);
+            }
+
+            handleDepartmentActivated(data) {
+                const department = data.details?.department || 'Unknown';
+                const agents = data.details?.agents || 0;
+                
+                this.addMessage('bot', `🏢 **${department} Department** activated with ${agents} agents`, 'success');
+            }
+
+            handleWorkflowProgress(data) {
+                const workflow = data.details?.workflow || 'Unknown workflow';
+                const progress = data.details?.progress || 0;
+                const currentStep = data.details?.current_step || 'Processing';
+                
+                this.addMessage('bot', `🔄 **${workflow}**: ${currentStep} (${progress}%)`);
+            }
+
+            addDebugMessage(label, data) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message system-message';
+                messageDiv.innerHTML = `
+                    <strong>DEBUG - ${label}:</strong>
+                    <div class="debug-info">${JSON.stringify(data, null, 2)}</div>
+                `;
+                this.messagesContainer.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            addAgentCard(agent) {
+                const card = document.createElement('div');
+                card.className = 'agent-card';
+                
+                let cardContent = `<div class="agent-title">${agent.name || 'Unnamed Agent'}</div>`;
+                
+                if (agent.description) {
+                    cardContent += `<div>${agent.description}</div>`;
+                }
+                
+                if (agent.capabilities && agent.capabilities.length > 0) {
+                    cardContent += '<div class="capabilities">';
+                    agent.capabilities.forEach(cap => {
+                        cardContent += `<span class="capability-badge">${cap}</span>`;
+                    });
+                    cardContent += '</div>';
+                }
+                
+                if (agent.integrations && agent.integrations.length > 0) {
+                    cardContent += '<div style="margin-top: 0.5rem; font-size: 0.875rem; color: #9ca3af;">';
+                    cardContent += `<strong>Integrations:</strong> ${agent.integrations.join(', ')}`;
+                    cardContent += '</div>';
+                }
+                
+                card.innerHTML = cardContent;
+                this.messagesContainer.appendChild(card);
+                this.scrollToBottom();
+            }
+
+            updateOrCreateProgress(progress, status) {
+                let progressMsg = this.messagesContainer.querySelector('.progress-message:last-child');
+                
+                if (!progressMsg || progressMsg.dataset.completed === 'true') {
+                    progressMsg = document.createElement('div');
+                    progressMsg.className = 'message progress-message';
+                    this.messagesContainer.appendChild(progressMsg);
+                }
+                
+                progressMsg.innerHTML = `
+                    <div>${status}</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${progress}%"></div>
+                    </div>
+                    <small>${progress}%</small>
+                `;
+                
+                this.scrollToBottom();
+                
+                if (progress >= 100) {
+                    progressMsg.dataset.completed = 'true';
+                    setTimeout(() => {
+                        if (progressMsg.parentNode) {
+                            progressMsg.remove();
+                        }
+                    }, 3000);
+                }
+            }
+
+            sendMessage() {
+                const message = this.messageInput.value.trim();
+                if (!message || this.isProcessing) return;
+                
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    this.addMessage('system', 'Not connected to server. Please wait for connection...');
+                    return;
+                }
+                
+                this.addMessage('user', message);
+                
+                const messageData = {
+                    user_request: message,
+                    mode: this.currentMode
+                };
+                
+                if (this.debugMode) {
+                    this.addDebugMessage('Sending', messageData);
+                }
+                
+                this.ws.send(JSON.stringify(messageData));
+                this.messageInput.value = '';
+                this.autoResize();
+                this.setProcessing(true);
+            }
+
+            setProcessing(processing) {
+                this.isProcessing = processing;
+                this.sendBtn.disabled = processing;
+                this.sendBtn.textContent = processing ? 'Processing...' : 'Send';
+            }
+
+            addMessage(role, content, type = 'normal') {
+                const messageDiv = document.createElement('div');
+                let className = 'message ';
+                
+                switch (role) {
+                    case 'user':
+                        className += 'user-message';
+                        break;
+                    case 'bot':
+                        if (type === 'error') className += 'error-message';
+                        else if (type === 'success') className += 'success-message';
+                        else if (type === 'progress') className += 'progress-message';
+                        else className += 'bot-message';
+                        break;
+                    case 'system':
+                        className += 'system-message';
+                        break;
+                }
+                
+                messageDiv.className = className;
+                
+                // Simple markdown-like formatting
+                let formattedContent = content
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/\n/g, '<br>');
+                
+                messageDiv.innerHTML = formattedContent;
+                
+                this.messagesContainer.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            scrollToBottom() {
+                this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+            }
+        }
+
+        // Initialize the chat when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new HeyJarvisChat();
+            
+            // Add helpful info
+            console.log('HeyJarvis Frontend loaded');
+            console.log('Press Ctrl+D to toggle debug mode');
+        });
+    </script>
+</body>
+</html>
