@@ -93,13 +93,8 @@ async def create_agent(request: AgentRequest):
             request.session_id
         )
         
-        # Handle deployment_status whether it's a string or enum
-        status = result["deployment_status"]
-        if hasattr(status, 'value'):
-            status = status.value
-            
         return AgentResponse(
-            status=status,
+            status=result["deployment_status"].value,
             agent_spec=result.get("agent_spec"),
             error_message=result.get("error_message"),
             execution_context=result.get("execution_context", {})
@@ -147,14 +142,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # Process request
             result = await orchestrator.process_request(user_request, session_id)
             
-            # Handle deployment_status whether it's a string or enum
-            status = result["deployment_status"]
-            if hasattr(status, 'value'):
-                status = status.value
-                
             # Send response
             await websocket.send_json({
-                "status": status,
+                "status": result["deployment_status"].value,
                 "agent_spec": result.get("agent_spec"),
                 "error_message": result.get("error_message"),
                 "execution_context": result.get("execution_context", {})
