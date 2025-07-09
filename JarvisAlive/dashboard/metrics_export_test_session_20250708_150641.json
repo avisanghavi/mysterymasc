@@ -1,0 +1,51 @@
+{
+  "timestamp": "2025-07-08T15:06:41.032805",
+  "session_id": "test_session",
+  "metrics": {
+    "leads_generated": 47,
+    "leads_qualified": 23,
+    "messages_composed": 15,
+    "emails_sent": 12,
+    "responses_received": 3,
+    "meetings_booked": 2,
+    "total_workflows_executed": 8,
+    "average_execution_time": 2.3,
+    "success_rate": 88.69255958708821,
+    "personalization_score": 0.76,
+    "response_rate": 0.25,
+    "active_workflows": 2
+  },
+  "workflows": [
+    {
+      "name": "Lead Generation",
+      "status": "running",
+      "progress": 67,
+      "elapsed_time": 13.4,
+      "eta": 5.2
+    },
+    {
+      "name": "Quick Wins",
+      "status": "completed",
+      "progress": 100,
+      "elapsed_time": 8.7,
+      "eta": 0
+    },
+    {
+      "name": "Full Outreach",
+      "status": "queued",
+      "progress": 0,
+      "elapsed_time": 0,
+      "eta": 45.0
+    }
+  ],
+  "current_task": {
+    "name": "Scanning SaaS CTOs",
+    "status": "In Progress",
+    "current_step": 3,
+    "total_steps": 5,
+    "progress": 60,
+    "message": "Processing 25 potential leads...",
+    "details": "Found 15 qualifying leads so far"
+  },
+  "export_format": "json"
+}

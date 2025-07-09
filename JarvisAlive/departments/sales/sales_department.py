@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+from pydantic import BaseModel
 
 # Import base department infrastructure
 from ..base_department import Department, DepartmentOrchestrator
@@ -21,7 +22,32 @@ from agent_builder.agent_spec import (
     IntegrationConfig
 )
 
+# Import real agent implementations
+try:
+    from .agents.lead_scanner_implementation import LeadScannerAgent, ScanCriteria
+    from .agents.outreach_composer_implementation import OutreachComposerAgent, OutreachConfig, ToneStyle
+    REAL_AGENTS_AVAILABLE = True
+except ImportError:
+    REAL_AGENTS_AVAILABLE = False
+    logging.warning("Real agent implementations not available - using mock agents only")
+
 logger = logging.getLogger(__name__)
+
+
+class DepartmentMetrics(BaseModel):
+    """Enhanced metrics tracking for sales department"""
+    leads_generated: int = 0
+    leads_qualified: int = 0
+    messages_composed: int = 0
+    emails_sent: int = 0
+    responses_received: int = 0
+    meetings_booked: int = 0
+    total_workflows_executed: int = 0
+    average_execution_time: float = 0.0
+    last_execution: Optional[datetime] = None
+    success_rate: float = 0.0
+    personalization_score: float = 0.0
+    response_rate: float = 0.0
 
 
 @dataclass
@@ -94,6 +120,28 @@ class SalesDepartment(Department):
         )
         
         self.session_id = session_id
+        
+        # Enhanced metrics tracking
+        self.metrics = DepartmentMetrics()
+        
+        # Initialize real agents if available
+        if REAL_AGENTS_AVAILABLE:
+            self.lead_scanner = LeadScannerAgent(mode="mock")
+            self.outreach_composer = OutreachComposerAgent(mode="template")
+            logger.info("Initialized real sales agents")
+        else:
+            self.lead_scanner = None
+            self.outreach_composer = None
+            logger.warning("Using mock agents only")
+        
+        # Keep existing structure for compatibility
+        self.agents = {
+            "lead_scanner": self.lead_scanner,
+            "outreach_composer": self.outreach_composer,
+            # Other agents remain as specs for now
+            "meeting_scheduler": None,
+            "pipeline_tracker": None
+        }
         
         # Sales-specific state
         self.leads_database: Dict[str, Lead] = {}
@@ -280,47 +328,55 @@ class SalesDepartment(Department):
             logger.error(f"Error initializing Sales Department agents: {e}")
             return False
     
-    async def execute_workflow(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_workflow(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute sales department workflows.
+        Execute sales department workflows with real agents.
         
         Args:
-            task: Task specification with workflow type and parameters
+            config: Workflow configuration with type and parameters
             
         Returns:
             Dict containing workflow results and metrics
         """
         try:
-            workflow_type = task.get("workflow_type", "full_pipeline")
+            workflow_type = config.get("workflow_type", "lead_generation")
             
             logger.info(f"Executing sales workflow: {workflow_type}")
             
             if workflow_type == "lead_generation":
-                return await self._execute_lead_generation_workflow(task)
+                return await self._execute_lead_generation_workflow(config)
+            elif workflow_type == "quick_wins":
+                return await self._execute_quick_wins_workflow(config)
+            elif workflow_type == "full_outreach":
+                return await self._execute_full_outreach_workflow(config)
             elif workflow_type == "lead_nurturing":
-                return await self._execute_lead_nurturing_workflow(task)
+                return await self._execute_lead_nurturing_workflow(config)
             elif workflow_type == "meeting_scheduling":
-                return await self._execute_meeting_scheduling_workflow(task)
+                return await self._execute_meeting_scheduling_workflow(config)
             elif workflow_type == "pipeline_reporting":
-                return await self._execute_pipeline_reporting_workflow(task)
+                return await self._execute_pipeline_reporting_workflow(config)
             elif workflow_type == "full_pipeline":
-                return await self._execute_full_pipeline_workflow(task)
+                return await self._execute_full_pipeline_workflow(config)
             else:
-                return {
-                    "success": False,
-                    "error": f"Unknown workflow type: {workflow_type}",
-                    "supported_workflows": [
-                        "lead_generation", "lead_nurturing", "meeting_scheduling", 
-                        "pipeline_reporting", "full_pipeline"
-                    ]
-                }
+                # Fallback to existing mock workflow
+                return await self._execute_mock_workflow(config)
         
         except Exception as e:
-            logger.error(f"Error executing sales workflow {task.get('workflow_type', 'unknown')}: {e}")
+            logger.error(f"Error executing sales workflow {config.get('workflow_type', 'unknown')}: {e}")
+            return await self.execute_workflow_safe(config)
+
+    async def execute_workflow_safe(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute workflow with comprehensive error handling"""
+        try:
+            return await self.execute_workflow(config)
+        except Exception as e:
+            logger.error(f"Workflow execution failed: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
-                "workflow_type": task.get("workflow_type", "unknown")
+                "error_type": type(e).__name__,
+                "workflow_type": config.get("workflow_type"),
+                "fallback": "Contact support if this persists"
             }
     
     async def get_status(self) -> Dict[str, Any]:
@@ -681,25 +737,297 @@ class SalesDepartment(Department):
     
     # Private helper methods
     
-    async def _execute_lead_generation_workflow(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute lead generation workflow."""
+    async def _execute_lead_generation_workflow(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Real lead generation using actual agents.
+        
+        Steps:
+        1. Parse criteria from config
+        2. Scan for leads using LeadScannerAgent
+        3. Store results in Redis
+        4. Track metrics
+        5. Return results
+        """
+        start_time = datetime.now()
+        
         try:
-            criteria = task.get("criteria", {
-                "titles": ["CEO", "CTO", "VP Engineering"],
-                "max_leads": 20
-            })
+            if not self.lead_scanner:
+                # Fallback to mock implementation
+                return await self._execute_lead_generation_mock(config)
             
-            new_leads = await self.find_new_leads(criteria)
+            # Parse criteria
+            criteria = ScanCriteria(
+                industries=config.get("industries", []),
+                titles=config.get("titles", []),
+                company_sizes=config.get("company_sizes", []),
+                min_score=config.get("min_score", 60),
+                max_results=config.get("max_results", 50)
+            )
+            
+            # Scan for leads
+            logger.info(f"Scanning for leads with criteria: {criteria}")
+            leads = await self.lead_scanner.scan_for_leads(criteria)
+            
+            # Store in Redis
+            for lead in leads:
+                key = f"session:{self.session_id}:lead:{lead.lead_id}"
+                try:
+                    if self.redis_client:
+                        await self.redis_client.setex(
+                            key,
+                            3600,  # 1 hour TTL
+                            lead.json()
+                        )
+                except Exception as redis_error:
+                    logger.warning(f"Failed to store lead in Redis: {redis_error}")
+            
+            # Update metrics
+            self.metrics.leads_generated += len(leads)
+            execution_time = (datetime.now() - start_time).total_seconds()
+            self.metrics.total_workflows_executed += 1
+            self.metrics.last_execution = datetime.now()
+            
+            # Update average execution time
+            if self.metrics.total_workflows_executed > 0:
+                self.metrics.average_execution_time = (
+                    (self.metrics.average_execution_time * (self.metrics.total_workflows_executed - 1) + execution_time) /
+                    self.metrics.total_workflows_executed
+                )
             
             return {
                 "success": True,
                 "workflow_type": "lead_generation",
-                "leads_found": len(new_leads),
-                "leads": [{"id": lead.id, "name": lead.name, "company": lead.company, "score": lead.score} for lead in new_leads]
+                "leads_found": len(leads),
+                "leads": [lead.dict() for lead in leads[:10]],  # First 10 for preview
+                "execution_time": execution_time,
+                "metrics": self.metrics.dict()
             }
             
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.error(f"Lead generation workflow failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_type": "lead_generation",
+                "execution_time": (datetime.now() - start_time).total_seconds()
+            }
+
+    async def _execute_quick_wins_workflow(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Find top 5 leads and generate outreach.
+        
+        Steps:
+        1. Scan with high minimum score (80+)
+        2. Take top 5 results
+        3. Generate personalized outreach for each
+        4. Return package of leads + messages
+        """
+        start_time = datetime.now()
+        
+        try:
+            if not self.lead_scanner or not self.outreach_composer:
+                return {
+                    "success": False,
+                    "error": "Real agents not available",
+                    "workflow_type": "quick_wins"
+                }
+            
+            # Step 1: Scan for high-quality leads
+            criteria = ScanCriteria(
+                industries=config.get("industries", ["SaaS", "FinTech"]),
+                titles=config.get("titles", ["CTO", "VP", "Director"]),
+                min_score=80,  # High score threshold
+                max_results=5   # Top 5 only
+            )
+            
+            leads = await self.lead_scanner.scan_for_leads(criteria)
+            
+            if not leads:
+                return {
+                    "success": True,
+                    "workflow_type": "quick_wins",
+                    "message": "No high-quality leads found with current criteria",
+                    "leads_found": 0,
+                    "execution_time": (datetime.now() - start_time).total_seconds()
+                }
+            
+            # Step 2: Generate outreach for each lead
+            outreach_results = []
+            
+            outreach_config = OutreachConfig(
+                category="cold_outreach",
+                tone=ToneStyle.FORMAL,
+                personalization_depth="deep",
+                sender_info={
+                    "sender_name": config.get("sender_name", "Sales Team"),
+                    "sender_title": config.get("sender_title", "Account Executive"),
+                    "sender_company": config.get("sender_company", "Our Company")
+                }
+            )
+            
+            for lead in leads:
+                try:
+                    message = await self.outreach_composer.compose_outreach(lead, outreach_config)
+                    outreach_results.append({
+                        "lead": lead.dict(),
+                        "message": {
+                            "subject": message.subject,
+                            "body": message.body,
+                            "personalization_score": message.personalization_score,
+                            "predicted_response_rate": message.predicted_response_rate
+                        }
+                    })
+                    self.metrics.messages_composed += 1
+                except Exception as e:
+                    logger.error(f"Failed to compose outreach for lead {lead.lead_id}: {e}")
+            
+            # Update metrics
+            self.metrics.leads_qualified += len(leads)
+            execution_time = (datetime.now() - start_time).total_seconds()
+            self.metrics.total_workflows_executed += 1
+            self.metrics.last_execution = datetime.now()
+            
+            return {
+                "success": True,
+                "workflow_type": "quick_wins",
+                "leads_found": len(leads),
+                "messages_generated": len(outreach_results),
+                "quick_wins": outreach_results,
+                "execution_time": execution_time,
+                "metrics": self.metrics.dict()
+            }
+            
+        except Exception as e:
+            logger.error(f"Quick wins workflow failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_type": "quick_wins",
+                "execution_time": (datetime.now() - start_time).total_seconds()
+            }
+
+    async def _execute_full_outreach_workflow(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Complete outreach campaign.
+        
+        Steps:
+        1. Scan for leads
+        2. Generate outreach for all qualifying leads
+        3. Create A/B variants
+        4. Schedule sending (mock for now)
+        5. Return campaign summary
+        """
+        start_time = datetime.now()
+        
+        try:
+            if not self.lead_scanner or not self.outreach_composer:
+                return {
+                    "success": False,
+                    "error": "Real agents not available",
+                    "workflow_type": "full_outreach"
+                }
+            
+            # Step 1: Scan for leads
+            criteria = ScanCriteria(
+                industries=config.get("industries", []),
+                titles=config.get("titles", []),
+                company_sizes=config.get("company_sizes", []),
+                min_score=config.get("min_score", 65),
+                max_results=config.get("campaign_size", 25)
+            )
+            
+            leads = await self.lead_scanner.scan_for_leads(criteria)
+            
+            if not leads:
+                return {
+                    "success": True,
+                    "workflow_type": "full_outreach",
+                    "message": "No qualifying leads found",
+                    "leads_found": 0,
+                    "execution_time": (datetime.now() - start_time).total_seconds()
+                }
+            
+            # Step 2: Generate outreach for all leads
+            outreach_config = OutreachConfig(
+                category="cold_outreach",
+                tone=ToneStyle(config.get("message_tone", "formal")),
+                personalization_depth="moderate",
+                sender_info={
+                    "sender_name": config.get("sender_name", "Sales Team"),
+                    "sender_title": config.get("sender_title", "Account Executive"), 
+                    "sender_company": config.get("sender_company", "Our Company")
+                }
+            )
+            
+            campaign_messages = []
+            total_personalization = 0
+            total_response_rate = 0
+            
+            for lead in leads:
+                try:
+                    message = await self.outreach_composer.compose_outreach(lead, outreach_config)
+                    
+                    campaign_messages.append({
+                        "lead_id": lead.lead_id,
+                        "contact_name": lead.contact.full_name,
+                        "company_name": lead.company.name,
+                        "subject": message.subject,
+                        "body": message.body[:200] + "..." if len(message.body) > 200 else message.body,
+                        "personalization_score": message.personalization_score,
+                        "predicted_response_rate": message.predicted_response_rate,
+                        "priority": lead.outreach_priority,
+                        "ab_variants": len(message.metadata.get("ab_variants", []))
+                    })
+                    
+                    total_personalization += message.personalization_score
+                    total_response_rate += message.predicted_response_rate
+                    self.metrics.messages_composed += 1
+                    
+                except Exception as e:
+                    logger.error(f"Failed to compose outreach for lead {lead.lead_id}: {e}")
+            
+            # Calculate campaign metrics
+            avg_personalization = total_personalization / len(campaign_messages) if campaign_messages else 0
+            avg_response_rate = total_response_rate / len(campaign_messages) if campaign_messages else 0
+            
+            # Update department metrics
+            self.metrics.leads_qualified += len(leads)
+            self.metrics.personalization_score = avg_personalization
+            self.metrics.response_rate = avg_response_rate
+            execution_time = (datetime.now() - start_time).total_seconds()
+            self.metrics.total_workflows_executed += 1
+            self.metrics.last_execution = datetime.now()
+            
+            return {
+                "success": True,
+                "workflow_type": "full_outreach",
+                "campaign_summary": {
+                    "leads_found": len(leads),
+                    "messages_generated": len(campaign_messages),
+                    "avg_personalization_score": round(avg_personalization, 2),
+                    "avg_response_rate": round(avg_response_rate, 2),
+                    "estimated_responses": round(len(campaign_messages) * avg_response_rate),
+                    "campaign_size": config.get("campaign_size", 25)
+                },
+                "messages": campaign_messages[:5],  # Show first 5 messages
+                "execution_time": execution_time,
+                "metrics": self.metrics.dict(),
+                "next_steps": [
+                    "Review generated messages",
+                    "Schedule sending times",
+                    "Set up response tracking",
+                    "Monitor campaign performance"
+                ]
+            }
+            
+        except Exception as e:
+            logger.error(f"Full outreach workflow failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_type": "full_outreach",
+                "execution_time": (datetime.now() - start_time).total_seconds()
+            }
     
     async def _execute_lead_nurturing_workflow(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Execute lead nurturing workflow."""
@@ -902,3 +1230,130 @@ class SalesDepartment(Department):
             recommendations.append("Prioritize meeting scheduling with qualified prospects")
         
         return recommendations if recommendations else ["Pipeline is performing well - continue current activities"]
+
+    # New utility methods for real agent integration
+    
+    def get_agent_status(self) -> Dict[str, str]:
+        """Check health of all agents"""
+        return {
+            "lead_scanner": "active" if self.lead_scanner else "inactive",
+            "outreach_composer": "active" if self.outreach_composer else "inactive",
+            "response_handler": "not_implemented",
+            "meeting_scheduler": "not_implemented"
+        }
+    
+    def get_workflow_options(self) -> List[Dict]:
+        """Return available workflows with descriptions"""
+        return [
+            {
+                "id": "lead_generation",
+                "name": "Lead Generation",
+                "description": "Find and qualify potential leads",
+                "estimated_time": "10-30 seconds",
+                "parameters": ["industries", "titles", "company_sizes", "max_results"]
+            },
+            {
+                "id": "quick_wins", 
+                "name": "Quick Wins",
+                "description": "Find top 5 leads and prepare outreach",
+                "estimated_time": "20-40 seconds",
+                "parameters": ["industries", "titles"]
+            },
+            {
+                "id": "full_outreach",
+                "name": "Full Outreach Campaign",
+                "description": "Find leads and generate personalized messages",
+                "estimated_time": "30-60 seconds",
+                "parameters": ["industries", "titles", "company_sizes", "message_tone", "campaign_size"]
+            },
+            {
+                "id": "lead_nurturing",
+                "name": "Lead Nurturing",
+                "description": "Follow up with existing leads",
+                "estimated_time": "15-30 seconds",
+                "parameters": ["lead_ids"]
+            },
+            {
+                "id": "meeting_scheduling",
+                "name": "Meeting Scheduling",
+                "description": "Schedule meetings with qualified prospects",
+                "estimated_time": "20-45 seconds",
+                "parameters": ["prospects"]
+            },
+            {
+                "id": "pipeline_reporting",
+                "name": "Pipeline Report",
+                "description": "Generate comprehensive pipeline status",
+                "estimated_time": "5-15 seconds",
+                "parameters": []
+            }
+        ]
+    
+    def estimate_execution_time(self, workflow: str, count: int) -> float:
+        """Estimate execution time in seconds"""
+        base_times = {
+            "lead_generation": 0.2,  # per lead
+            "quick_wins": 15.0,  # flat
+            "full_outreach": 0.5,  # per lead
+            "lead_nurturing": 0.3,  # per lead
+            "meeting_scheduling": 0.4,  # per prospect
+            "pipeline_reporting": 5.0  # flat
+        }
+        
+        flat_workflows = ["quick_wins", "pipeline_reporting"]
+        if workflow in flat_workflows:
+            return base_times.get(workflow, 10.0)
+        else:
+            return base_times.get(workflow, 1.0) * count
+
+    def update_metrics(self, workflow_type: str, results: Dict):
+        """Update department metrics after workflow execution"""
+        self.metrics.total_workflows_executed += 1
+        self.metrics.last_execution = datetime.now()
+        
+        # Update specific metrics based on workflow type
+        if workflow_type == "lead_generation":
+            self.metrics.leads_generated += results.get("leads_found", 0)
+        elif workflow_type == "quick_wins":
+            self.metrics.leads_qualified += results.get("leads_found", 0)
+            self.metrics.messages_composed += results.get("messages_generated", 0)
+        elif workflow_type == "full_outreach":
+            campaign_summary = results.get("campaign_summary", {})
+            self.metrics.leads_qualified += campaign_summary.get("leads_found", 0)
+            self.metrics.messages_composed += campaign_summary.get("messages_generated", 0)
+            self.metrics.personalization_score = campaign_summary.get("avg_personalization_score", 0)
+            self.metrics.response_rate = campaign_summary.get("avg_response_rate", 0)
+        
+        # Calculate success rate
+        if self.metrics.total_workflows_executed > 0:
+            successful_workflows = sum(1 for result in [results] if result.get("success", False))
+            self.metrics.success_rate = successful_workflows / self.metrics.total_workflows_executed
+
+    async def _execute_mock_workflow(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback to mock workflow when real agents not available"""
+        workflow_type = config.get("workflow_type", "unknown")
+        
+        return {
+            "success": False,
+            "error": f"Mock workflow not implemented for {workflow_type}",
+            "workflow_type": workflow_type,
+            "fallback": "Real agents not available",
+            "suggestion": "Check agent initialization"
+        }
+
+    async def _execute_lead_generation_mock(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Mock implementation fallback for lead generation"""
+        criteria = config.get("criteria", {
+            "titles": ["CEO", "CTO", "VP Engineering"],
+            "max_leads": 20
+        })
+        
+        new_leads = await self.find_new_leads(criteria)
+        
+        return {
+            "success": True,
+            "workflow_type": "lead_generation",
+            "leads_found": len(new_leads),
+            "leads": [{"id": lead.id, "name": lead.name, "company": lead.company, "score": lead.score} for lead in new_leads],
+            "note": "Using mock implementation"
+        }
