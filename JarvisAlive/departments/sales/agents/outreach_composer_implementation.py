@@ -8,12 +8,13 @@ import random
 import json
 import sys
 import os
+import asyncio
 from collections import defaultdict
 
 # Add ai_engines to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
-from email_templates import EmailTemplateLibrary, ToneStyle, EmailTemplate
+from .email_templates import EmailTemplateLibrary, ToneStyle, EmailTemplate
 from ai_engines.base_engine import BaseAIEngine, AIEngineConfig
 from ai_engines.anthropic_engine import AnthropicEngine
 from ai_engines.mock_engine import MockAIEngine
@@ -28,6 +29,19 @@ except ImportError:
         def __init__(self, **kwargs):
             for key, value in kwargs.items():
                 setattr(self, key, value)
+
+# Import Gmail integration
+try:
+    from integrations.gmail_integration import GmailIntegration, EmailMessage, EmailRecipient
+    from integrations.supabase_auth_manager import SupabaseAuthManager
+    import redis.asyncio as redis
+except ImportError:
+    # Fallback for testing
+    GmailIntegration = None
+    EmailMessage = None
+    EmailRecipient = None
+    SupabaseAuthManager = None
+    redis = None
 
 
 class OutreachMessage(BaseModel):
@@ -83,6 +97,16 @@ class OutreachComposerAgent:
         self.ai_engine = None
         if mode in ["ai", "hybrid"]:
             self._initialize_ai_engine()
+        
+        # Initialize Gmail integration
+        self.gmail_client = None
+        self.auth_manager = None
+        self.redis_client = None
+        self.user_id = config.get('user_id') if config else None
+        self.gmail_enabled = config.get('gmail_enabled', False) if config else False
+        
+        if self.gmail_enabled and GmailIntegration:
+            asyncio.create_task(self._initialize_gmail())
             
     def _initialize_ai_engine(self):
         """Initialize AI engine"""
@@ -101,6 +125,60 @@ class OutreachComposerAgent:
         else:
             self.ai_engine = MockAIEngine(ai_config, deterministic=False)
             self.logger.info("Initialized Mock AI engine for outreach")
+    
+    async def _initialize_gmail(self):
+        """Initialize Gmail integration with credentials from Supabase"""
+        try:
+            # Initialize Redis for queue management
+            redis_url = self.config.get('redis_url', 'redis://localhost:6379')
+            self.redis_client = await redis.from_url(redis_url)
+            
+            # Initialize auth manager
+            self.auth_manager = SupabaseAuthManager(
+                supabase_url=self.config.get('supabase_url', os.getenv('SUPABASE_URL')),
+                supabase_key=self.config.get('supabase_key', os.getenv('SUPABASE_KEY')),
+                encryption_key=self.config.get('encryption_key', os.getenv('ENCRYPTION_KEY'))
+            )
+            await self.auth_manager.initialize()
+            
+            # Get Gmail credentials
+            if self.user_id:
+                credential = await self.auth_manager.get_credentials(
+                    user_id=self.user_id,
+                    service="google",
+                    auto_refresh=True
+                )
+                
+                if credential and credential.access_token:
+                    # Initialize Gmail client
+                    from google.oauth2.credentials import Credentials
+                    
+                    google_creds = Credentials(
+                        token=credential.access_token,
+                        refresh_token=credential.refresh_token,
+                        token_uri="https://oauth2.googleapis.com/token",
+                        client_id=self.config.get('gmail_client_id', os.getenv('GMAIL_CLIENT_ID')),
+                        client_secret=self.config.get('gmail_client_secret', os.getenv('GMAIL_CLIENT_SECRET'))
+                    )
+                    
+                    self.gmail_client = GmailIntegration(
+                        credentials=google_creds,
+                        redis_client=self.redis_client,
+                        test_mode=self.config.get('gmail_test_mode', True),
+                        daily_limit=self.config.get('daily_email_limit', 50),
+                        tracking_domain=self.config.get('tracking_domain', 'localhost:8000')
+                    )
+                    self.logger.info("Gmail integration initialized successfully")
+                else:
+                    self.logger.warning("No Gmail credentials found, email sending disabled")
+                    self.gmail_enabled = False
+            else:
+                self.logger.warning("No user_id provided, email sending disabled")
+                self.gmail_enabled = False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Gmail: {e}")
+            self.gmail_enabled = False
 
     def _setup_personalization_data(self):
         """Setup data for personalization"""
@@ -1235,3 +1313,317 @@ Format as JSON with keys: probability, strengths, weaknesses, improvement"""
         
         # Fallback to first template
         return templates[0].id if templates else "cold_outreach_formal_1"
+    
+    async def send_real_email(
+        self,
+        message: OutreachMessage,
+        lead: Lead,
+        send_immediately: bool = False,
+        queue_priority: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Send real email via Gmail API with tracking and safety features
+        
+        Args:
+            message: Outreach message to send
+            lead: Lead information for personalization
+            send_immediately: If True, send now; if False, add to queue
+            queue_priority: Queue priority (1-10, lower = higher priority)
+            
+        Returns:
+            Dictionary with send status and tracking information
+        """
+        if not self.gmail_enabled or not self.gmail_client:
+            return {
+                "success": False,
+                "error": "Gmail integration not available",
+                "fallback": "email_sending_disabled"
+            }
+        
+        try:
+            # Create email recipients
+            recipients = []
+            for contact in [lead.contact]:  # Can extend to multiple contacts
+                recipient = EmailRecipient(
+                    email=contact.email,
+                    name=contact.full_name,
+                    lead_id=lead.lead_id
+                )
+                recipients.append(recipient)
+            
+            # Convert text body to HTML if needed
+            html_body = self._convert_to_html(message.body, lead)
+            
+            # Create unsubscribe URL
+            unsubscribe_url = self._generate_unsubscribe_url(lead, message.message_id)
+            
+            # Create Gmail message
+            gmail_message = EmailMessage(
+                id=message.message_id,
+                to=recipients,
+                subject=message.subject,
+                text_body=message.body,
+                html_body=html_body,
+                tracking_enabled=True,
+                unsubscribe_url=unsubscribe_url,
+                thread_id=None  # For now, not handling threads
+            )
+            
+            if send_immediately:
+                # Send immediately
+                result = await self.gmail_client.send_email(
+                    gmail_message,
+                    self.user_id,
+                    bypass_limits=False
+                )
+                
+                if result["success"]:
+                    # Update lead with tracking information
+                    await self._update_lead_tracking(lead, message, result)
+                    
+                    return {
+                        "success": True,
+                        "method": "immediate_send",
+                        "gmail_id": result.get("gmail_id"),
+                        "thread_id": result.get("thread_id"),
+                        "tracking_ids": [r.tracking_id for r in recipients],
+                        "test_mode": result.get("test_mode", False)
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": result.get("error"),
+                        "queued_for_retry": result.get("queued_for_retry", False)
+                    }
+            else:
+                # Add to queue
+                queued = await self.gmail_client.add_to_queue(
+                    gmail_message,
+                    self.user_id,
+                    priority=queue_priority,
+                    delay_minutes=0
+                )
+                
+                if queued:
+                    return {
+                        "success": True,
+                        "method": "queued",
+                        "message_id": message.message_id,
+                        "queue_priority": queue_priority,
+                        "tracking_ids": [r.tracking_id for r in recipients]
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": "Failed to add to queue"
+                    }
+        
+        except Exception as e:
+            self.logger.error(f"Failed to send email {message.message_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message_id": message.message_id
+            }
+    
+    def _convert_to_html(self, text_body: str, lead: Lead) -> str:
+        """Convert text email to HTML with proper formatting"""
+        
+        # Escape HTML characters
+        import html
+        escaped_text = html.escape(text_body)
+        
+        # Convert line breaks to <br> tags
+        html_body = escaped_text.replace('\n\n', '</p><p>').replace('\n', '<br>')
+        
+        # Wrap in paragraphs
+        html_body = f'<p>{html_body}</p>'
+        
+        # Create full HTML email template
+        html_template = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{lead.company.name} - Outreach</title>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    margin: 0;
+                    padding: 20px;
+                    background-color: #f9f9f9;
+                }}
+                .email-container {{
+                    max-width: 600px;
+                    margin: 0 auto;
+                    background-color: white;
+                    padding: 30px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }}
+                .email-header {{
+                    border-bottom: 2px solid #f0f0f0;
+                    padding-bottom: 20px;
+                    margin-bottom: 30px;
+                }}
+                .email-content {{
+                    font-size: 16px;
+                    line-height: 1.7;
+                }}
+                .email-content p {{
+                    margin: 0 0 20px 0;
+                }}
+                .email-footer {{
+                    margin-top: 40px;
+                    padding-top: 20px;
+                    border-top: 1px solid #eee;
+                    font-size: 14px;
+                    color: #666;
+                    text-align: center;
+                }}
+                .signature {{
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #f0f0f0;
+                    font-size: 14px;
+                    color: #666;
+                }}
+                a {{
+                    color: #0066cc;
+                    text-decoration: none;
+                }}
+                a:hover {{
+                    text-decoration: underline;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="email-container">
+                <div class="email-header">
+                    <h2 style="margin: 0; color: #333;">Personal Message for {lead.contact.first_name}</h2>
+                </div>
+                
+                <div class="email-content">
+                    {html_body}
+                </div>
+                
+                <div class="signature">
+                    <p><strong>{self.config.get('sender_name', 'Sales Team')}</strong><br>
+                    {self.config.get('sender_title', 'Account Executive')}<br>
+                    {self.config.get('sender_company', 'Our Company')}<br>
+                    {self.config.get('sender_phone', '')}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html_template
+    
+    def _generate_unsubscribe_url(self, lead: Lead, message_id: str) -> str:
+        """Generate unique unsubscribe URL for the lead"""
+        
+        # Create unique token for unsubscribe
+        import hashlib
+        token_data = f"{lead.lead_id}:{message_id}:{lead.contact.email}"
+        token = hashlib.sha256(token_data.encode()).hexdigest()[:16]
+        
+        base_url = self.config.get('base_url', 'https://localhost:8000')
+        return f"{base_url}/api/unsubscribe/{token}"
+    
+    async def _update_lead_tracking(self, lead: Lead, message: OutreachMessage, send_result: Dict):
+        """Update lead with email tracking information"""
+        
+        if not self.redis_client:
+            return
+        
+        try:
+            # Store lead-message mapping for tracking
+            tracking_data = {
+                "lead_id": lead.lead_id,
+                "message_id": message.message_id,
+                "gmail_id": send_result.get("gmail_id"),
+                "thread_id": send_result.get("thread_id"),
+                "sent_at": datetime.now().isoformat(),
+                "subject": message.subject,
+                "recipient": lead.contact.email,
+                "contact_name": lead.contact.full_name,
+                "company_name": lead.company.name,
+                "lead_score": lead.score.total_score
+            }
+            
+            # Store in Redis for 30 days
+            tracking_key = f"outreach_tracking:{message.message_id}"
+            await self.redis_client.setex(
+                tracking_key,
+                timedelta(days=30),
+                json.dumps(tracking_data)
+            )
+            
+            # Update lead's email history
+            lead_history_key = f"lead_emails:{lead.lead_id}"
+            email_entry = {
+                "message_id": message.message_id,
+                "sent_at": datetime.now().isoformat(),
+                "subject": message.subject,
+                "gmail_id": send_result.get("gmail_id")
+            }
+            
+            # Add to lead's email history (keep last 50 emails)
+            await self.redis_client.lpush(lead_history_key, json.dumps(email_entry))
+            await self.redis_client.ltrim(lead_history_key, 0, 49)
+            await self.redis_client.expire(lead_history_key, timedelta(days=90))
+            
+        except Exception as e:
+            self.logger.error(f"Failed to update lead tracking: {e}")
+    
+    async def get_email_status(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """Get email sending and tracking status"""
+        
+        if not self.gmail_client or not self.redis_client:
+            return None
+        
+        try:
+            # Get tracking data
+            tracking_key = f"outreach_tracking:{message_id}"
+            tracking_data = await self.redis_client.get(tracking_key)
+            
+            if not tracking_data:
+                return None
+            
+            tracking_info = json.loads(tracking_data)
+            
+            # Get Gmail tracking summary (if available)
+            gmail_summary = None
+            if "tracking_ids" in tracking_info:
+                for tracking_id in tracking_info["tracking_ids"]:
+                    summary = await self.gmail_client.get_tracking_summary(tracking_id)
+                    if summary:
+                        gmail_summary = summary
+                        break
+            
+            return {
+                "message_id": message_id,
+                "tracking_info": tracking_info,
+                "gmail_tracking": gmail_summary,
+                "status": "sent" if tracking_info.get("gmail_id") else "queued"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get email status: {e}")
+            return None
+    
+    async def get_user_email_stats(self, days: int = 30) -> Dict[str, Any]:
+        """Get email sending statistics for the user"""
+        
+        if not self.gmail_client:
+            return {"error": "Gmail integration not available"}
+        
+        try:
+            return await self.gmail_client.get_user_stats(self.user_id, days)
+        except Exception as e:
+            self.logger.error(f"Failed to get email stats: {e}")
+            return {"error": str(e)}

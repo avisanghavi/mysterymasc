@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HeyJarvis Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         * {
             margin: 0;
@@ -27,6 +28,126 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+        }
+        
+        .auth-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .auth-modal {
+            background: #2d2d2d;
+            padding: 2rem;
+            border-radius: 1rem;
+            border: 1px solid #404040;
+            max-width: 400px;
+            width: 90%;
+        }
+        
+        .auth-title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        .auth-form {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .auth-input {
+            padding: 0.75rem;
+            border: 1px solid #404040;
+            border-radius: 0.5rem;
+            background: #1a1a1a;
+            color: #ffffff;
+            font-size: 1rem;
+        }
+        
+        .auth-input:focus {
+            outline: none;
+            border-color: #3b82f6;
+        }
+        
+        .auth-button {
+            padding: 0.75rem 1.5rem;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 1rem;
+            transition: background 0.2s;
+        }
+        
+        .auth-button:hover:not(:disabled) {
+            background: #2563eb;
+        }
+        
+        .auth-button:disabled {
+            background: #6b7280;
+            cursor: not-allowed;
+        }
+        
+        .auth-message {
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            text-align: center;
+        }
+        
+        .auth-message.success {
+            background: #14532d;
+            border: 1px solid #16a34a;
+            color: #bbf7d0;
+        }
+        
+        .auth-message.error {
+            background: #7f1d1d;
+            border: 1px solid #dc2626;
+            color: #fecaca;
+        }
+        
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #d1d5db;
+        }
+        
+        .user-email {
+            font-size: 0.875rem;
+        }
+        
+        .logout-btn {
+            padding: 0.25rem 0.75rem;
+            background: #374151;
+            color: #d1d5db;
+            border: 1px solid #4b5563;
+            border-radius: 0.25rem;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+        }
+        
+        .logout-btn:hover {
+            background: #4b5563;
+            border-color: #6b7280;
+        }
+        
+        .hidden {
+            display: none !important;
         }
 
         .logo {
@@ -282,9 +403,32 @@
 <body>
     <div class="connection-status disconnected" id="connectionStatus"></div>
     
+    <div class="auth-container hidden" id="authContainer">
+        <div class="auth-modal">
+            <div class="auth-title">Welcome to HeyJarvis</div>
+            <form class="auth-form" id="authForm">
+                <input 
+                    type="email" 
+                    class="auth-input" 
+                    id="emailInput" 
+                    placeholder="Enter your email address"
+                    required
+                >
+                <button type="submit" class="auth-button" id="authSubmitBtn">
+                    Send Magic Link
+                </button>
+            </form>
+            <div class="auth-message hidden" id="authMessage"></div>
+        </div>
+    </div>
+    
     <header class="header">
         <div class="logo">🤖 HeyJarvis</div>
-        <div class="mode-selector">
+        <div class="user-profile hidden" id="userProfile">
+            <span class="user-email" id="userEmail"></span>
+            <button class="logout-btn" id="logoutBtn">Logout</button>
+        </div>
+        <div class="mode-selector" id="modeSelector">
             <button class="mode-btn active" data-mode="agent-builder" id="agentBuilderBtn">
                 🔧 Agent Builder
             </button>
@@ -319,13 +463,33 @@
                 this.isProcessing = false;
                 this.debugMode = false; // Set to true to see raw messages
                 
+                // Auth state
+                this.supabase = null;
+                this.user = null;
+                this.accessToken = null;
+                this.refreshToken = null;
+                this.tokenRefreshTimer = null;
+                
+                this.initializeSupabase();
                 this.initializeElements();
                 this.setupEventListeners();
-                this.connect();
+                this.checkAuthState();
             }
 
             generateSessionId() {
                 return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+            
+            initializeSupabase() {
+                const supabaseUrl = 'https://wgeoaufvulfpuknpgnnv.supabase.co';
+                const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndnZW9hdWZ2dWxmcHVrbnBnbm52Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIwODg5OTAsImV4cCI6MjA2NzY2NDk5MH0.8ZPuFVAkOruOMsykMQUG2bnwNUweUXMtcw4DcCzohhI';
+                
+                if (supabaseUrl && supabaseKey) {
+                    this.supabase = supabase.createClient(supabaseUrl, supabaseKey);
+                    console.log('Supabase initialized');
+                } else {
+                    console.warn('Supabase not configured - using demo mode');
+                }
             }
 
             initializeElements() {
@@ -335,6 +499,17 @@
                 this.connectionStatus = document.getElementById('connectionStatus');
                 this.agentBuilderBtn = document.getElementById('agentBuilderBtn');
                 this.jarvisBtn = document.getElementById('jarvisBtn');
+                
+                // Auth elements
+                this.authContainer = document.getElementById('authContainer');
+                this.authForm = document.getElementById('authForm');
+                this.emailInput = document.getElementById('emailInput');
+                this.authSubmitBtn = document.getElementById('authSubmitBtn');
+                this.authMessage = document.getElementById('authMessage');
+                this.userProfile = document.getElementById('userProfile');
+                this.userEmail = document.getElementById('userEmail');
+                this.logoutBtn = document.getElementById('logoutBtn');
+                this.modeSelector = document.getElementById('modeSelector');
             }
 
             setupEventListeners() {
@@ -353,6 +528,10 @@
 
                 this.agentBuilderBtn.addEventListener('click', () => this.setMode('agent-builder'));
                 this.jarvisBtn.addEventListener('click', () => this.setMode('jarvis'));
+                
+                // Auth event listeners
+                this.authForm.addEventListener('submit', (e) => this.handleAuthSubmit(e));
+                this.logoutBtn.addEventListener('click', () => this.logout());
 
                 // Debug toggle - press 'D' to toggle debug mode
                 document.addEventListener('keydown', (e) => {
@@ -385,6 +564,165 @@
                 this.addMessage('system', `Switched to ${mode === 'agent-builder' ? 'Agent Builder' : 'Jarvis Business'} mode`);
             }
 
+            async checkAuthState() {
+                try {
+                    // Check localStorage for tokens
+                    const accessToken = localStorage.getItem('hey_jarvis_access_token');
+                    const refreshToken = localStorage.getItem('hey_jarvis_refresh_token');
+                    const userEmail = localStorage.getItem('hey_jarvis_user_email');
+                    
+                    if (accessToken && refreshToken) {
+                        this.accessToken = accessToken;
+                        this.refreshToken = refreshToken;
+                        this.user = { email: userEmail };
+                        
+                        // Verify token is still valid
+                        const isValid = await this.verifyToken();
+                        if (isValid) {
+                            this.showAuthenticatedState();
+                            this.connect();
+                            return;
+                        }
+                    }
+                    
+                    // Show auth form if no valid session
+                    this.showAuthForm();
+                    
+                } catch (error) {
+                    console.error('Auth check error:', error);
+                    this.showAuthForm();
+                }
+            }
+            
+            async verifyToken() {
+                try {
+                    const response = await fetch('/auth/profile', {
+                        headers: {
+                            'Authorization': `Bearer ${this.accessToken}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    if (response.ok) {
+                        const profile = await response.json();
+                        this.user = profile;
+                        return true;
+                    }
+                    
+                    return false;
+                } catch (error) {
+                    console.error('Token verification error:', error);
+                    return false;
+                }
+            }
+            
+            showAuthForm() {
+                this.authContainer.classList.remove('hidden');
+                this.modeSelector.classList.add('hidden');
+                this.userProfile.classList.add('hidden');
+            }
+            
+            showAuthenticatedState() {
+                this.authContainer.classList.add('hidden');
+                this.modeSelector.classList.remove('hidden');
+                this.userProfile.classList.remove('hidden');
+                this.userEmail.textContent = this.user.email;
+            }
+            
+            async handleAuthSubmit(e) {
+                e.preventDefault();
+                
+                const email = this.emailInput.value.trim();
+                if (!email) return;
+                
+                this.authSubmitBtn.disabled = true;
+                this.authSubmitBtn.textContent = 'Sending...';
+                
+                try {
+                    const response = await fetch('/auth/login', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ email })
+                    });
+                    
+                    if (response.ok) {
+                        this.showAuthMessage('Check your email for the magic link!', 'success');
+                        this.startTokenCheck();
+                    } else {
+                        const error = await response.json();
+                        this.showAuthMessage(error.detail || 'Login failed', 'error');
+                    }
+                } catch (error) {
+                    console.error('Login error:', error);
+                    this.showAuthMessage('Network error. Please try again.', 'error');
+                } finally {
+                    this.authSubmitBtn.disabled = false;
+                    this.authSubmitBtn.textContent = 'Send Magic Link';
+                }
+            }
+            
+            showAuthMessage(message, type) {
+                this.authMessage.textContent = message;
+                this.authMessage.className = `auth-message ${type}`;
+                this.authMessage.classList.remove('hidden');
+                
+                setTimeout(() => {
+                    this.authMessage.classList.add('hidden');
+                }, 5000);
+            }
+            
+            startTokenCheck() {
+                // Poll for tokens in case of magic link authentication
+                const checkInterval = setInterval(() => {
+                    const accessToken = localStorage.getItem('hey_jarvis_access_token');
+                    if (accessToken) {
+                        clearInterval(checkInterval);
+                        this.checkAuthState();
+                    }
+                }, 1000);
+                
+                // Stop checking after 5 minutes
+                setTimeout(() => clearInterval(checkInterval), 300000);
+            }
+            
+            async logout() {
+                try {
+                    await fetch('/auth/logout', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${this.accessToken}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                } catch (error) {
+                    console.error('Logout error:', error);
+                }
+                
+                // Clear local storage
+                localStorage.removeItem('hey_jarvis_access_token');
+                localStorage.removeItem('hey_jarvis_refresh_token');
+                localStorage.removeItem('hey_jarvis_user_email');
+                
+                // Reset state
+                this.accessToken = null;
+                this.refreshToken = null;
+                this.user = null;
+                
+                // Close WebSocket
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
+                
+                // Show auth form
+                this.showAuthForm();
+                
+                // Clear messages
+                this.messagesContainer.innerHTML = '';
+            }
+            
             connect() {
                 const wsUrl = `ws://localhost:8000/ws/${this.sessionId}`;
                 
@@ -393,8 +731,17 @@
                     
                     this.ws.onopen = () => {
                         console.log('Connected to HeyJarvis backend');
+                        
+                        // Send auth token immediately
+                        this.ws.send(JSON.stringify({
+                            auth_token: this.accessToken
+                        }));
+                        
                         this.updateConnectionStatus(true);
                         this.addMessage('system', 'Connected to HeyJarvis. How can I help you today?');
+                        
+                        // Schedule token refresh
+                        this.scheduleTokenRefresh();
                     };
 
                     this.ws.onmessage = (event) => {
@@ -723,9 +1070,65 @@
                 }
             }
 
-            sendMessage() {
+            async refreshToken() {
+                try {
+                    if (!this.refreshToken) {
+                        throw new Error('No refresh token available');
+                    }
+                    
+                    const response = await fetch('/auth/refresh', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ refresh_token: this.refreshToken })
+                    });
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.accessToken = data.access_token;
+                        this.refreshToken = data.refresh_token;
+                        
+                        // Update localStorage
+                        localStorage.setItem('hey_jarvis_access_token', this.accessToken);
+                        localStorage.setItem('hey_jarvis_refresh_token', this.refreshToken);
+                        
+                        // Schedule next refresh
+                        this.scheduleTokenRefresh();
+                        
+                        return true;
+                    }
+                    
+                    throw new Error('Token refresh failed');
+                } catch (error) {
+                    console.error('Token refresh error:', error);
+                    // Force re-authentication
+                    this.logout();
+                    return false;
+                }
+            }
+            
+            scheduleTokenRefresh() {
+                // Clear existing timer
+                if (this.tokenRefreshTimer) {
+                    clearTimeout(this.tokenRefreshTimer);
+                }
+                
+                // Refresh token 5 minutes before expiry (JWT tokens typically expire in 1 hour)
+                const refreshInterval = 55 * 60 * 1000; // 55 minutes
+                this.tokenRefreshTimer = setTimeout(() => {
+                    this.refreshToken();
+                }, refreshInterval);
+            }
+            
+            async sendMessage() {
                 const message = this.messageInput.value.trim();
                 if (!message || this.isProcessing) return;
+                
+                if (!this.user || !this.accessToken) {
+                    this.addMessage('system', 'Please log in to send messages.');
+                    return;
+                }
                 
                 if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
                     this.addMessage('system', 'Not connected to server. Please wait for connection...');
@@ -793,8 +1196,37 @@
             }
         }
 
+        // Handle magic link authentication
+        function handleMagicLinkAuth() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const accessToken = urlParams.get('access_token');
+            const refreshToken = urlParams.get('refresh_token');
+            const userEmail = urlParams.get('email');
+            
+            if (accessToken && refreshToken) {
+                // Store tokens
+                localStorage.setItem('hey_jarvis_access_token', accessToken);
+                localStorage.setItem('hey_jarvis_refresh_token', refreshToken);
+                if (userEmail) {
+                    localStorage.setItem('hey_jarvis_user_email', userEmail);
+                }
+                
+                // Clean up URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+                
+                console.log('Magic link authentication successful');
+                return true;
+            }
+            
+            return false;
+        }
+        
         // Initialize the chat when the page loads
         document.addEventListener('DOMContentLoaded', () => {
+            // Check for magic link auth first
+            handleMagicLinkAuth();
+            
+            // Initialize chat
             new HeyJarvisChat();
             
             // Add helpful info

@@ -1,11 +1,11 @@
-"""FastAPI server for HeyJarvis orchestrator."""
+#!/usr/bin/env python3
+"""Simplified FastAPI server for testing HeyJarvis authentication."""
 
 import asyncio
 import logging
 import os
 from typing import Dict, Any, Optional
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -15,9 +15,10 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import jwt
 from jwt.exceptions import InvalidTokenError
+import redis.asyncio as redis
 
-from orchestration.orchestrator import HeyJarvisOrchestrator, OrchestratorConfig
 from models.auth_middleware import AuthMiddleware
+from models.user_profile import UserProfile
 
 # Load environment variables
 load_dotenv()
@@ -27,26 +28,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global instances
-orchestrator = None
 supabase: Optional[Client] = None
 auth_middleware: Optional[AuthMiddleware] = None
+redis_client = None
 
 # Security
 security = HTTPBearer()
-
-
-class AgentRequest(BaseModel):
-    """Request model for agent creation."""
-    user_request: str
-    session_id: str
-
-
-class AgentResponse(BaseModel):
-    """Response model for agent creation."""
-    status: str
-    agent_spec: Dict[str, Any] = None
-    error_message: str = None
-    execution_context: Dict[str, Any] = None
 
 
 class AuthRequest(BaseModel):
@@ -60,66 +47,18 @@ class AuthCallbackRequest(BaseModel):
     refresh_token: str
 
 
-class UserProfile(BaseModel):
-    """User profile response model."""
-    id: str
-    email: str
-    created_at: str
-    metadata: Dict[str, Any] = {}
+class MockAgentRequest(BaseModel):
+    """Mock request model for testing."""
+    user_request: str
+    session_id: str
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage app lifecycle."""
-    global orchestrator, supabase
-    
-    # Startup
-    # Initialize Supabase
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY")
-    if supabase_url and supabase_key:
-        supabase = create_client(supabase_url, supabase_key)
-        logger.info("Supabase client initialized")
-    else:
-        logger.warning("Supabase credentials not found - running without authentication")
-    
-    # Initialize orchestrator
-    config = OrchestratorConfig(
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
-        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379"),
-    )
-    orchestrator = HeyJarvisOrchestrator(config)
-    await orchestrator.initialize()
-    logger.info("HeyJarvis orchestrator initialized")
-    
-    # Initialize auth middleware
-    auth_middleware = AuthMiddleware(orchestrator.redis_client)
-    logger.info("Auth middleware initialized")
-    
-    yield
-    
-    # Shutdown
-    if orchestrator:
-        await orchestrator.close()
-    logger.info("HeyJarvis orchestrator shut down")
-
-
-# Create FastAPI app
-app = FastAPI(
-    title="HeyJarvis API",
-    description="AI Agent Orchestration System",
-    version="0.1.0",
-    lifespan=lifespan
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class MockAgentResponse(BaseModel):
+    """Mock response model for testing."""
+    status: str
+    message: str
+    user_id: str
+    session_id: str
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
@@ -171,10 +110,69 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         )
 
 
+# Create FastAPI app
+app = FastAPI(
+    title="HeyJarvis Authentication Test API",
+    description="Simplified API for testing Supabase authentication",
+    version="0.1.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup."""
+    global supabase, auth_middleware, redis_client
+    
+    # Initialize Supabase
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    if supabase_url and supabase_key:
+        supabase = create_client(supabase_url, supabase_key)
+        logger.info("Supabase client initialized")
+    else:
+        logger.warning("Supabase credentials not found - running without authentication")
+    
+    # Initialize Redis and auth middleware
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        redis_client = redis.from_url(redis_url)
+        auth_middleware = AuthMiddleware(redis_client)
+        
+        # Test Redis connection
+        await redis_client.ping()
+        logger.info("Redis connection established")
+        
+    except Exception as e:
+        logger.error(f"Redis connection failed: {e}")
+        redis_client = None
+        auth_middleware = None
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up on shutdown."""
+    if redis_client:
+        await redis_client.close()
+
+
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return {"message": "HeyJarvis API is running"}
+    return {
+        "message": "HeyJarvis Authentication Test API is running",
+        "supabase_configured": supabase is not None,
+        "redis_configured": redis_client is not None,
+        "auth_middleware_ready": auth_middleware is not None
+    }
 
 
 @app.post("/auth/login")
@@ -264,20 +262,23 @@ async def logout(current_user: Dict[str, Any] = Depends(get_current_user)):
         return {"message": "Logged out"}
 
 
-@app.get("/auth/profile", response_model=UserProfile)
+@app.get("/auth/profile")
 async def get_profile(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Get current user profile."""
-    return UserProfile(
-        id=current_user["id"],
-        email=current_user["email"],
-        created_at=current_user.get("created_at", datetime.utcnow().isoformat()),
-        metadata=current_user.get("metadata", {})
-    )
+    return {
+        "id": current_user["id"],
+        "email": current_user["email"],
+        "authenticated": current_user["id"] != "anonymous",
+        "metadata": current_user.get("metadata", {})
+    }
 
 
 @app.get("/auth/usage")
 async def get_usage(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Get current user usage statistics."""
+    if not auth_middleware:
+        return {"error": "Auth middleware not available"}
+    
     try:
         usage = await auth_middleware.get_user_usage(current_user['id'])
         quotas = await auth_middleware.get_user_quotas(current_user['id'])
@@ -292,148 +293,119 @@ async def get_usage(current_user: Dict[str, Any] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/agents/create", response_model=AgentResponse)
-async def create_agent(request: AgentRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Create a new agent."""
+# Mock agent endpoint for testing authentication
+@app.post("/agents/create", response_model=MockAgentResponse)
+async def create_mock_agent(request: MockAgentRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Mock agent creation endpoint for testing authentication."""
     start_time = datetime.now()
     
     try:
-        # Check user quota
-        if not await auth_middleware.check_quota(current_user['id'], "agents"):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Agent creation quota exceeded"
-            )
-        
-        if not await auth_middleware.check_quota(current_user['id'], "requests"):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Request quota exceeded"
-            )
+        # Check user quota if auth middleware is available
+        if auth_middleware:
+            if not await auth_middleware.check_quota(current_user['id'], "agents"):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Agent creation quota exceeded"
+                )
+            
+            if not await auth_middleware.check_quota(current_user['id'], "requests"):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Request quota exceeded"
+                )
         
         # Prefix session_id with user_id for user isolation
         user_session_id = f"{current_user['id']}:{request.session_id}"
         
         # Migrate anonymous session if needed
-        if request.session_id.startswith("session_"):
+        if auth_middleware and request.session_id.startswith("session_"):
             user_session_id = await auth_middleware.migrate_anonymous_session(
                 current_user['id'], 
                 request.session_id
             )
         
-        result = await orchestrator.process_request(
-            request.user_request, 
-            user_session_id
+        # Mock agent creation logic
+        mock_response = MockAgentResponse(
+            status="completed",
+            message=f"Mock agent created for request: '{request.user_request}'",
+            user_id=current_user['id'],
+            session_id=user_session_id
         )
         
-        # Track usage
-        processing_time = (datetime.now() - start_time).total_seconds()
-        await auth_middleware.track_api_request(
-            current_user['id'], 
-            "/agents/create", 
-            processing_time
-        )
-        
-        # Track agent creation if successful
-        if result.get("deployment_status") and result["deployment_status"].value == "completed":
-            agent_spec = result.get("agent_spec", {})
+        # Track usage if middleware is available
+        if auth_middleware:
+            processing_time = (datetime.now() - start_time).total_seconds()
+            await auth_middleware.track_api_request(
+                current_user['id'], 
+                "/agents/create", 
+                processing_time
+            )
+            
+            # Track mock agent creation
             await auth_middleware.track_agent_creation(
                 current_user['id'],
-                agent_spec.get("id", "unknown"),
-                agent_spec.get("type", "unknown")
+                "mock_agent_123",
+                "mock_agent"
             )
         
-        return AgentResponse(
-            status=result["deployment_status"].value,
-            agent_spec=result.get("agent_spec"),
-            error_message=result.get("error_message"),
-            execution_context=result.get("execution_context", {})
-        )
+        return mock_response
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating agent: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/agents/session/{session_id}")
-async def get_session_agents(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Get agents for a session."""
-    try:
-        # Prefix session_id with user_id for user isolation
-        user_session_id = f"{current_user['id']}:{session_id}"
-        
-        state = await orchestrator.recover_session(user_session_id)
-        if state:
-            return {
-                "session_id": session_id,
-                "agents": state.get("existing_agents", [])
-            }
-        return {"session_id": session_id, "agents": []}
-        
-    except Exception as e:
-        logger.error(f"Error getting session agents: {e}")
+        logger.error(f"Error creating mock agent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time agent creation."""
+    """WebSocket endpoint for testing authentication."""
     await websocket.accept()
     
     # First message should contain auth token
-    auth_message = await websocket.receive_json()
-    auth_token = auth_message.get("auth_token")
-    
-    if not auth_token:
-        await websocket.send_json({"error": "Authentication required"})
-        await websocket.close()
-        return
-    
-    # Verify token
     try:
-        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_token)
-        current_user = await get_current_user(credentials)
-    except HTTPException as e:
-        await websocket.send_json({"error": f"Authentication failed: {e.detail}"})
-        await websocket.close()
-        return
-    
-    # Track WebSocket connection
-    await auth_middleware.track_websocket_connection(current_user['id'])
-    
-    # Prefix session_id with user_id
-    user_session_id = f"{current_user['id']}:{session_id}"
-    
-    # Migrate anonymous session if needed
-    if session_id.startswith("session_"):
-        user_session_id = await auth_middleware.migrate_anonymous_session(
-            current_user['id'], 
-            session_id
-        )
-    
-    try:
+        auth_message = await websocket.receive_json()
+        auth_token = auth_message.get("auth_token")
+        
+        if not auth_token:
+            await websocket.send_json({"error": "Authentication required"})
+            await websocket.close()
+            return
+        
+        # Verify token
+        try:
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_token)
+            current_user = await get_current_user(credentials)
+        except HTTPException as e:
+            await websocket.send_json({"error": f"Authentication failed: {e.detail}"})
+            await websocket.close()
+            return
+        
+        # Track WebSocket connection
+        if auth_middleware:
+            await auth_middleware.track_websocket_connection(current_user['id'])
+        
+        # Prefix session_id with user_id
+        user_session_id = f"{current_user['id']}:{session_id}"
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "welcome",
+            "message": f"WebSocket authenticated for user {current_user['email']}",
+            "user_session_id": user_session_id
+        })
+        
+        # Handle messages
         while True:
-            # Receive user request
             data = await websocket.receive_json()
-            user_request = data.get("user_request")
+            user_request = data.get("user_request", "")
             
-            if not user_request:
-                await websocket.send_json({
-                    "error": "user_request is required"
-                })
-                continue
-            
-            # Process request
-            result = await orchestrator.process_request(user_request, user_session_id)
-            
-            # Send response
+            # Echo back with user context
             await websocket.send_json({
-                "status": result["deployment_status"].value,
-                "agent_spec": result.get("agent_spec"),
-                "error_message": result.get("error_message"),
-                "execution_context": result.get("execution_context", {})
+                "type": "response",
+                "message": f"Received from {current_user['email']}: {user_request}",
+                "user_id": current_user['id'],
+                "session_id": user_session_id
             })
             
     except Exception as e:
@@ -443,4 +415,4 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -9,6 +9,7 @@ import re
 import json
 import sys
 import os
+import redis.asyncio as redis
 
 # Add ai_engines to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
@@ -17,6 +18,10 @@ from database.mock_data import Company, Contact, get_qualified_leads, get_all_co
 from ai_engines.base_engine import BaseAIEngine, AIEngineConfig
 from ai_engines.anthropic_engine import AnthropicEngine
 from ai_engines.mock_engine import MockAIEngine
+
+# Import HubSpot and Supabase integrations
+from integrations.hubspot_integration import HubSpotIntegration, HubSpotContact, HubSpotCompany
+from integrations.supabase_auth_manager import SupabaseAuthManager, ServiceType
 
 
 class LeadScore(BaseModel):
@@ -73,7 +78,7 @@ class ScanCriteria(BaseModel):
 
 
 class LeadScannerAgent:
-    def __init__(self, mode: Literal["mock", "hybrid", "ai"] = "mock", config: Optional[Dict] = None):
+    def __init__(self, mode: Literal["mock", "hybrid", "ai", "hubspot"] = "mock", config: Optional[Dict] = None):
         self.mode = mode
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
@@ -86,6 +91,15 @@ class LeadScannerAgent:
         self.ai_engine = None
         if mode in ["hybrid", "ai"]:
             self._initialize_ai_engine()
+        
+        # Initialize HubSpot integration if needed
+        self.hubspot_client = None
+        self.auth_manager = None
+        self.redis_client = None
+        self.user_id = config.get('user_id') if config else None
+        
+        if mode == "hubspot":
+            asyncio.create_task(self._initialize_hubspot())
 
     def _setup_scoring_weights(self):
         """Setup configurable scoring weights"""
@@ -176,6 +190,10 @@ class LeadScannerAgent:
             enriched_leads = await self._enrich_with_ai(mock_leads, min(20, len(mock_leads)))
             
             return enriched_leads
+            
+        elif self.mode == "hubspot":
+            # HubSpot mode - use real CRM data
+            return await self._scan_hubspot_data(criteria)
             
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -507,8 +525,136 @@ class LeadScannerAgent:
         else:
             return "low"
 
+    async def _initialize_hubspot(self):
+        """Initialize HubSpot integration with credentials from Supabase"""
+        try:
+            # Initialize Redis for caching
+            redis_url = self.config.get('redis_url', 'redis://localhost:6379')
+            self.redis_client = await redis.from_url(redis_url)
+            
+            # Initialize auth manager
+            self.auth_manager = SupabaseAuthManager(
+                supabase_url=self.config.get('supabase_url', os.getenv('SUPABASE_URL')),
+                supabase_key=self.config.get('supabase_key', os.getenv('SUPABASE_KEY')),
+                encryption_key=self.config.get('encryption_key', os.getenv('ENCRYPTION_KEY'))
+            )
+            await self.auth_manager.initialize()
+            
+            # Get HubSpot credentials
+            if self.user_id:
+                credential = await self.auth_manager.get_credentials(
+                    user_id=self.user_id,
+                    service="hubspot",
+                    auto_refresh=True
+                )
+                
+                if credential and credential.access_token:
+                    # Initialize HubSpot client
+                    self.hubspot_client = HubSpotIntegration(
+                        access_token=credential.access_token,
+                        redis_client=self.redis_client
+                    )
+                    self.logger.info("HubSpot integration initialized successfully")
+                else:
+                    self.logger.warning("No HubSpot credentials found, falling back to mock mode")
+                    self.mode = "mock"
+            else:
+                self.logger.warning("No user_id provided, falling back to mock mode")
+                self.mode = "mock"
+                
+        except Exception as e:
+            self.logger.error(f"Failed to initialize HubSpot: {e}")
+            self.mode = "mock"  # Fall back to mock mode
+    
+    async def _scan_hubspot_data(self, criteria: ScanCriteria) -> List[Lead]:
+        """Scan for leads using real HubSpot data"""
+        if not self.hubspot_client:
+            self.logger.warning("HubSpot not initialized, falling back to mock mode")
+            return await self._scan_mock_data(criteria)
+        
+        try:
+            self.logger.info(f"Starting HubSpot scan with criteria: {criteria}")
+            
+            # Search HubSpot contacts
+            hubspot_contacts = await self.hubspot_client.search_contacts_by_criteria(
+                title_keywords=criteria.titles,
+                industries=criteria.industries,
+                company_size_min=self._get_company_size_min(criteria.company_sizes),
+                company_size_max=self._get_company_size_max(criteria.company_sizes),
+                last_activity_days=180,  # Look for active contacts
+                lifecycle_stages=["lead", "marketingqualifiedlead", "salesqualifiedlead"],
+                limit=criteria.max_results * 2  # Get extra to account for filtering
+            )
+            
+            # Score and convert to Lead objects
+            scored_leads = []
+            for hs_contact in hubspot_contacts:
+                try:
+                    # Get associated company if available
+                    company_data = await self._get_hubspot_company_data(hs_contact)
+                    
+                    # Convert to our models
+                    contact = self._convert_hubspot_contact(hs_contact)
+                    company = self._convert_hubspot_company(company_data) if company_data else self._create_default_company(hs_contact)
+                    
+                    # Calculate score with HubSpot activity data
+                    score = await self._score_hubspot_lead(hs_contact, contact, company, criteria)
+                    
+                    # Skip leads below minimum score
+                    if score.total_score < criteria.min_score:
+                        continue
+                    
+                    # Determine outreach priority
+                    priority = self._determine_priority(score.total_score)
+                    
+                    lead = Lead(
+                        lead_id=f"lead_{hs_contact.id}",
+                        contact=contact,
+                        company=company,
+                        score=score,
+                        discovered_at=datetime.now(),
+                        source="hubspot",
+                        enrichment_data={
+                            "hubspot_id": hs_contact.id,
+                            "lifecycle_stage": hs_contact.lifecyclestage,
+                            "last_activity": hs_contact.notes_last_contacted.isoformat() if hs_contact.notes_last_contacted else None,
+                            "email_engagement": {
+                                "opens": hs_contact.hs_email_open,
+                                "clicks": hs_contact.hs_email_click
+                            }
+                        },
+                        outreach_priority=priority
+                    )
+                    scored_leads.append(lead)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing HubSpot contact {hs_contact.id}: {e}")
+                    continue
+            
+            # Sort by score (descending)
+            scored_leads.sort(key=lambda x: x.score.total_score, reverse=True)
+            
+            # Apply max_results limit
+            final_leads = scored_leads[:criteria.max_results]
+            
+            # Log metrics
+            self._log_scan_metrics(criteria, final_leads)
+            
+            return final_leads
+            
+        except Exception as e:
+            self.logger.error(f"Error in HubSpot scan: {e}")
+            # Fall back to mock data
+            return await self._scan_mock_data(criteria)
+    
     async def _get_raw_leads(self, criteria: ScanCriteria) -> List[tuple]:
-        """Get raw leads from mock data source"""
+        """Get raw leads from data source"""
+        if self.mode == "hubspot" and self.hubspot_client:
+            # For HubSpot mode, this method is not used
+            # We use _scan_hubspot_data directly
+            return []
+        
+        # Original mock data implementation
         try:
             # Get all companies and contacts
             companies = get_all_companies()
@@ -877,3 +1023,238 @@ Format as JSON with keys: industry_insights, company_insights (dict with company
   Tech: {', '.join(company.technologies[:3])}
 """)
         return '\n'.join(formatted)
+    
+    def _get_company_size_min(self, company_sizes: Optional[List[str]]) -> Optional[int]:
+        """Extract minimum company size from criteria"""
+        if not company_sizes:
+            return None
+        
+        min_size = float('inf')
+        for size_range in company_sizes:
+            if '1-10' in size_range:
+                min_size = min(min_size, 1)
+            elif '11-50' in size_range:
+                min_size = min(min_size, 11)
+            elif '51-200' in size_range:
+                min_size = min(min_size, 51)
+            elif '201-500' in size_range:
+                min_size = min(min_size, 201)
+            elif '501-1000' in size_range:
+                min_size = min(min_size, 501)
+            elif '1001+' in size_range:
+                min_size = min(min_size, 1001)
+        
+        return min_size if min_size != float('inf') else None
+    
+    def _get_company_size_max(self, company_sizes: Optional[List[str]]) -> Optional[int]:
+        """Extract maximum company size from criteria"""
+        if not company_sizes:
+            return None
+        
+        max_size = 0
+        for size_range in company_sizes:
+            if '1-10' in size_range:
+                max_size = max(max_size, 10)
+            elif '11-50' in size_range:
+                max_size = max(max_size, 50)
+            elif '51-200' in size_range:
+                max_size = max(max_size, 200)
+            elif '201-500' in size_range:
+                max_size = max(max_size, 500)
+            elif '501-1000' in size_range:
+                max_size = max(max_size, 1000)
+            elif '1001+' in size_range:
+                max_size = max(max_size, 10000)  # Arbitrary large number
+        
+        return max_size if max_size > 0 else None
+    
+    async def _get_hubspot_company_data(self, hs_contact: HubSpotContact) -> Optional[HubSpotCompany]:
+        """Get company data associated with a HubSpot contact"""
+        try:
+            # If contact has company property, search for it
+            if hs_contact.company:
+                companies, _ = await self.hubspot_client.get_companies(
+                    filters=[{
+                        "filters": [{
+                            "propertyName": "name",
+                            "operator": "EQ",
+                            "value": hs_contact.company
+                        }]
+                    }],
+                    limit=1
+                )
+                
+                if companies:
+                    return companies[0]
+            
+            # Try to get associated companies
+            # This would require additional API call - simplified for now
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error getting company data: {e}")
+            return None
+    
+    def _convert_hubspot_contact(self, hs_contact: HubSpotContact) -> Contact:
+        """Convert HubSpot contact to our Contact model"""
+        return Contact(
+            id=hs_contact.id,
+            full_name=f"{hs_contact.firstname or ''} {hs_contact.lastname or ''}".strip() or "Unknown",
+            title=hs_contact.jobtitle or "Unknown",
+            email=hs_contact.email or f"contact_{hs_contact.id}@unknown.com",
+            phone=hs_contact.phone,
+            linkedin_url=hs_contact.custom_properties.get("linkedin_url"),
+            department=self._extract_department_from_title(hs_contact.jobtitle or ""),
+            seniority_level=self._extract_seniority_from_title(hs_contact.jobtitle or ""),
+            years_in_role=None,  # Would need custom property
+            verified=True  # HubSpot data is verified
+        )
+    
+    def _convert_hubspot_company(self, hs_company: HubSpotCompany) -> Company:
+        """Convert HubSpot company to our Company model"""
+        return Company(
+            id=hs_company.id,
+            name=hs_company.name or "Unknown Company",
+            industry=hs_company.industry or "Other",
+            sub_industry=hs_company.industry or "General",
+            employee_count=hs_company.numberofemployees or 0,
+            revenue_range=self._estimate_revenue_range(hs_company.annualrevenue),
+            location=f"{hs_company.city}, {hs_company.state}".strip(", ") if hs_company.city or hs_company.state else "Unknown",
+            website=hs_company.website,
+            description=hs_company.description or "",
+            technologies=[],  # Would need custom properties
+            recent_news=[],  # Would need separate API calls
+            funding_stage=None,  # Would need custom property
+            growth_rate=None  # Would need to calculate
+        )
+    
+    def _create_default_company(self, hs_contact: HubSpotContact) -> Company:
+        """Create a default company when no company data is available"""
+        return Company(
+            id=f"unknown_{hs_contact.id}",
+            name=hs_contact.company or "Unknown Company",
+            industry="Other",
+            sub_industry="General",
+            employee_count=0,
+            revenue_range="Unknown",
+            location="Unknown",
+            website=hs_contact.website,
+            description="",
+            technologies=[],
+            recent_news=[],
+            funding_stage=None,
+            growth_rate=None
+        )
+    
+    def _extract_department_from_title(self, title: str) -> str:
+        """Extract department from job title"""
+        title_lower = title.lower()
+        if any(word in title_lower for word in ["sales", "revenue", "business development"]):
+            return "Sales"
+        elif any(word in title_lower for word in ["marketing", "growth", "demand"]):
+            return "Marketing"
+        elif any(word in title_lower for word in ["engineering", "technical", "development", "cto"]):
+            return "Engineering"
+        elif any(word in title_lower for word in ["product", "pm"]):
+            return "Product"
+        elif any(word in title_lower for word in ["finance", "cfo", "accounting"]):
+            return "Finance"
+        elif any(word in title_lower for word in ["hr", "human resources", "people", "talent"]):
+            return "HR"
+        elif any(word in title_lower for word in ["operations", "ops", "coo"]):
+            return "Operations"
+        elif any(word in title_lower for word in ["ceo", "founder", "president"]):
+            return "Executive"
+        else:
+            return "Other"
+    
+    def _extract_seniority_from_title(self, title: str) -> str:
+        """Extract seniority level from job title"""
+        title_lower = title.lower()
+        if any(word in title_lower for word in ["ceo", "cto", "cfo", "coo", "chief", "president"]):
+            return "C-Level"
+        elif any(word in title_lower for word in ["vp", "vice president", "head of"]):
+            return "VP"
+        elif any(word in title_lower for word in ["director"]):
+            return "Director"
+        elif any(word in title_lower for word in ["manager", "lead"]):
+            return "Manager"
+        elif any(word in title_lower for word in ["senior", "sr"]):
+            return "Senior"
+        elif any(word in title_lower for word in ["junior", "jr", "associate"]):
+            return "Junior"
+        else:
+            return "Individual Contributor"
+    
+    def _estimate_revenue_range(self, annual_revenue: Optional[float]) -> str:
+        """Estimate revenue range from annual revenue"""
+        if not annual_revenue:
+            return "Unknown"
+        elif annual_revenue < 1000000:
+            return "<$1M"
+        elif annual_revenue < 10000000:
+            return "$1M-$10M"
+        elif annual_revenue < 50000000:
+            return "$10M-$50M"
+        elif annual_revenue < 100000000:
+            return "$50M-$100M"
+        elif annual_revenue < 500000000:
+            return "$100M-$500M"
+        else:
+            return "$500M+"
+    
+    async def _score_hubspot_lead(self, hs_contact: HubSpotContact, contact: Contact, 
+                                 company: Company, criteria: ScanCriteria) -> LeadScore:
+        """Score a lead with HubSpot activity data"""
+        # Start with base scoring
+        base_score = self.score_lead(contact, company, criteria)
+        
+        # Calculate HubSpot activity score (0-100)
+        activity_score = await self.hubspot_client.calculate_activity_score(hs_contact)
+        
+        # Enhance recent activity score with HubSpot data
+        enhanced_activity = int(base_score.recent_activity * 0.5 + activity_score * 0.5 * 0.2)  # 20% weight
+        
+        # Check for deals
+        deal_bonus = 0
+        try:
+            deals = await self.hubspot_client.get_contact_deals(hs_contact.id)
+            if deals:
+                open_deals = [d for d in deals if not d.hs_is_closed]
+                if open_deals:
+                    deal_bonus = 10  # Bonus for having open deals
+        except Exception as e:
+            self.logger.warning(f"Failed to get deals for contact {hs_contact.id}: {e}")
+        
+        # Calculate enhanced total score
+        enhanced_total = min(100, base_score.industry_match + base_score.title_relevance + 
+                           base_score.company_size_fit + enhanced_activity + deal_bonus)
+        
+        # Generate enhanced explanation
+        explanations = []
+        if base_score.explanation:
+            explanations.append(base_score.explanation)
+        
+        if hs_contact.hs_email_open and hs_contact.hs_email_open > 10:
+            explanations.append(f"High email engagement ({hs_contact.hs_email_open} opens)")
+        
+        if hs_contact.notes_last_contacted:
+            days_since = (datetime.utcnow() - hs_contact.notes_last_contacted).days
+            if days_since < 30:
+                explanations.append(f"Recently contacted ({days_since} days ago)")
+        
+        if deal_bonus > 0:
+            explanations.append("Has open deals in pipeline")
+        
+        if hs_contact.lifecyclestage in ["salesqualifiedlead", "opportunity"]:
+            explanations.append(f"Sales qualified ({hs_contact.lifecyclestage})")
+        
+        return LeadScore(
+            total_score=enhanced_total,
+            industry_match=base_score.industry_match,
+            title_relevance=base_score.title_relevance,
+            company_size_fit=base_score.company_size_fit,
+            recent_activity=enhanced_activity,
+            explanation="; ".join(explanations),
+            confidence=min(1.0, base_score.confidence * 1.2)  # Higher confidence with real data
+        )

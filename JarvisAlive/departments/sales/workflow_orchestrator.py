@@ -282,9 +282,12 @@ class WorkflowOrchestrator:
                 for group_steps in parallel_groups.values():
                     if len(group_steps) == 1:
                         task = self._execute_step(execution_id, group_steps[0])
+                        tasks.append(task)
                     else:
-                        task = self._execute_parallel_steps(execution_id, group_steps)
-                    tasks.append(task)
+                        # Execute steps in parallel group concurrently
+                        for step in group_steps:
+                            task = self._execute_step(execution_id, step)
+                            tasks.append(task)
                 
                 # Wait for all parallel groups to complete
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -321,15 +324,20 @@ class WorkflowOrchestrator:
         execution = self.executions[execution_id]
         
         # Check condition if specified
-        if step.condition and not self._evaluate_condition(step.condition, execution.context_data):
-            result = WorkflowStepResult(
-                step_id=step.step_id,
-                status=WorkflowStepStatus.SKIPPED,
-                start_time=datetime.now(),
-                end_time=datetime.now()
-            )
-            execution.step_results[step.step_id] = result
-            return {step.step_id}
+        if step.condition:
+            condition_met = self._evaluate_condition(step.condition, execution.context_data)
+            self.logger.debug(f"Step {step.step_id} condition '{step.condition}' evaluated to {condition_met}")
+            
+            if not condition_met:
+                result = WorkflowStepResult(
+                    step_id=step.step_id,
+                    status=WorkflowStepStatus.SKIPPED,
+                    start_time=datetime.now(),
+                    end_time=datetime.now()
+                )
+                execution.step_results[step.step_id] = result
+                self.logger.info(f"Step {step.step_id} skipped due to condition")
+                return {step.step_id}
         
         result = WorkflowStepResult(
             step_id=step.step_id,
@@ -390,8 +398,18 @@ class WorkflowOrchestrator:
             if step.function_name and hasattr(agent, step.function_name):
                 func = getattr(agent, step.function_name)
                 
-                # Prepare parameters
-                params = {**step.parameters, **execution.parameters}
+                # Prepare parameters - resolve template variables
+                params = {}
+                for key, value in step.parameters.items():
+                    if isinstance(value, str) and value.startswith("{{") and value.endswith("}}"):
+                        # Template variable like {{scan_limit}}
+                        var_name = value[2:-2].strip()
+                        params[key] = execution.parameters.get(var_name, value)
+                    else:
+                        params[key] = value
+                
+                # Add execution parameters
+                params.update(execution.parameters)
                 params['context'] = execution.context_data
                 
                 # Call function
@@ -422,8 +440,53 @@ class WorkflowOrchestrator:
         try:
             # Simple and safe evaluation of conditions
             # In production, use a proper expression evaluator
+            
+            # Handle common condition patterns
+            if ">" in condition:
+                # Handle "context.get('score', 0) > 80" type conditions
+                parts = condition.split(">")
+                if len(parts) == 2:
+                    left_expr = parts[0].strip()
+                    right_value = float(parts[1].strip())
+                    
+                    # Extract value from context
+                    if "context.get(" in left_expr:
+                        # Extract key from context.get('key', default)
+                        start = left_expr.find("'") + 1
+                        end = left_expr.find("'", start)
+                        key = left_expr[start:end]
+                        
+                        # Get default value
+                        default_start = left_expr.find(",") + 1
+                        default_end = left_expr.find(")")
+                        default_val = float(left_expr[default_start:default_end].strip())
+                        
+                        actual_value = context.get(key, default_val)
+                        return float(actual_value) > right_value
+            
+            elif "<=" in condition:
+                # Handle "<=" conditions
+                parts = condition.split("<=")
+                if len(parts) == 2:
+                    left_expr = parts[0].strip()
+                    right_value = float(parts[1].strip())
+                    
+                    if "context.get(" in left_expr:
+                        start = left_expr.find("'") + 1
+                        end = left_expr.find("'", start)
+                        key = left_expr[start:end]
+                        
+                        default_start = left_expr.find(",") + 1
+                        default_end = left_expr.find(")")
+                        default_val = float(left_expr[default_start:default_end].strip())
+                        
+                        actual_value = context.get(key, default_val)
+                        return float(actual_value) <= right_value
+            
+            # Fallback to eval for other expressions
             return eval(condition, {"__builtins__": {}}, context)
-        except:
+        except Exception as e:
+            self.logger.debug(f"Condition evaluation failed: {condition} - {e}")
             return True  # Default to true if evaluation fails
     
     def _build_execution_graph(self, steps: List[WorkflowStep]) -> Dict[str, List[str]]:

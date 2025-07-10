@@ -50,6 +50,10 @@ beautifulsoup4==4.12.3
 uuid==1.30
 pathlib2==2.3.7
 
+# Authentication
+supabase==2.1.0
+pyjwt==2.8.0
+
 # Development and testing
 pytest==7.4.3
 pytest-asyncio==0.21.1

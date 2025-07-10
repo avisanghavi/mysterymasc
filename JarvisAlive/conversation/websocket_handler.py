@@ -91,12 +91,17 @@ class WebSocketHandler:
         self.subscriptions.clear()
         logger.info("WebSocket handler stopped")
     
-    async def add_connection(self, websocket, connection_id: str = None, mode: OperatingMode = OperatingMode.AGENT_BUILDER) -> str:
+    async def add_connection(self, websocket, connection_id: str = None, mode: OperatingMode = OperatingMode.AGENT_BUILDER, user_id: str = None) -> str:
         """Add a new WebSocket connection."""
         if not connection_id:
             connection_id = str(uuid.uuid4())
         
-        self.connections[connection_id] = websocket
+        self.connections[connection_id] = {
+            'websocket': websocket,
+            'user_id': user_id,
+            'connected_at': datetime.now(timezone.utc),
+            'last_activity': datetime.now(timezone.utc)
+        }
         self.connection_modes[connection_id] = mode
         
         # Send welcome message
@@ -109,12 +114,14 @@ class WebSocketHandler:
             details={
                 "connection_id": connection_id,
                 "mode": mode.value,
-                "version": "1.0.0"
+                "version": "1.0.0",
+                "user_id": user_id,
+                "authenticated": user_id is not None
             }
         )
         
         await self.send_to_connection(connection_id, welcome_msg)
-        logger.info(f"WebSocket connection added: {connection_id} (mode: {mode.value})")
+        logger.info(f"WebSocket connection added: {connection_id} (mode: {mode.value}, user: {user_id})")
         
         return connection_id
     
@@ -163,9 +170,12 @@ class WebSocketHandler:
     async def send_to_connection(self, connection_id: str, message: WebSocketMessage):
         """Send a message to a specific connection."""
         if connection_id in self.connections:
-            websocket = self.connections[connection_id]
+            connection = self.connections[connection_id]
+            websocket = connection['websocket']
             try:
                 await websocket.send(message.to_json())
+                # Update last activity
+                connection['last_activity'] = datetime.now(timezone.utc)
             except Exception as e:
                 logger.error(f"Error sending to connection {connection_id}: {e}")
                 await self.remove_connection(connection_id)
